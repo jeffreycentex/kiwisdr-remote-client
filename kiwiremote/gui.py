@@ -9,12 +9,12 @@ import sys
 import time
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence, QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox,
-    QStatusBar, QVBoxLayout, QWidget)
+    QScrollArea, QTabWidget, QStatusBar, QVBoxLayout, QWidget)
 
 from . import __version__
 from .api import DEFAULT_PORT as API_DEFAULT_PORT, ApiServer
@@ -46,9 +46,32 @@ class _Bridge(QObject):
     event = Signal(str, object)
 
 
+def apply_light_theme(app):
+    """Use a consistent light palette even when the desktop uses dark mode."""
+    app.setStyle("Fusion")
+    if hasattr(app.styleHints(), "setColorScheme"):
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    palette = QPalette()
+    for role, color in (
+        (QPalette.Window, "#f6f7f9"), (QPalette.WindowText, "#172334"),
+        (QPalette.Base, "#ffffff"), (QPalette.AlternateBase, "#eef2f7"),
+        (QPalette.Text, "#172334"), (QPalette.Button, "#ffffff"),
+        (QPalette.ButtonText, "#172334"), (QPalette.ToolTipBase, "#ffffff"),
+        (QPalette.ToolTipText, "#172334"), (QPalette.Highlight, "#2563eb"),
+        (QPalette.HighlightedText, "#ffffff"), (QPalette.Mid, "#cbd3df"),
+        (QPalette.Light, "#ffffff"), (QPalette.Dark, "#9ca9b9"),
+        (QPalette.PlaceholderText, "#64748b"),
+    ):
+        palette.setColor(role, QColor(color))
+    for role in (QPalette.Text, QPalette.WindowText, QPalette.ButtonText):
+        palette.setColor(QPalette.Disabled, role, QColor("#8993a2"))
+    app.setPalette(palette)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        apply_light_theme(QApplication.instance())
         self.setWindowTitle("KiwiSDR Remote %s" % __version__)
         self.settings = QSettings("KiwiSDR-Remote", "KiwiSDR Remote")
         self.bridge = _Bridge()
@@ -62,24 +85,71 @@ class MainWindow(QMainWindow):
         self.api = None
         self._rec_started = None
 
+        self.resize(680, 600)
+        self.setMinimumSize(560, 460)
+        self.setStyleSheet("""
+            QGroupBox { font-weight: 600; border: 1px solid palette(mid);
+                        border-radius: 6px; margin-top: 8px; padding: 9px 7px 5px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
+            QPushButton { min-height: 22px; padding: 2px 9px; }
+            QLineEdit, QComboBox, QSpinBox { min-height: 22px; }
+            QPushButton#connectAction { background: #2563eb; color: white;
+                                       border: 0; border-radius: 5px; font-weight: 600; }
+            QPushButton#recordAction:checked { background: #b42332; color: white;
+                                              border-radius: 5px; }
+        """)
         central = QWidget()
         root = QVBoxLayout(central)
-        root.addWidget(self._build_server_box())
-        root.addWidget(self._build_tune_box())
-        root.addWidget(self._build_audio_box())
-        root.addWidget(self._build_record_box())
-        root.addWidget(self._build_rigctl_box())
-        root.addWidget(self._build_api_box())
-        root.addStretch(1)
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        exit_btn = QPushButton("Exit")
-        exit_btn.setToolTip("Disconnect, stop recording and close the application")
-        exit_btn.clicked.connect(self.close)    # closeEvent saves settings and shuts down
-        bottom.addWidget(exit_btn)
-        root.addLayout(bottom)
+        root.setContentsMargins(10, 8, 10, 6)
+        root.setSpacing(6)
+        header = QHBoxLayout()
+        title = QLabel("KiwiSDR Remote")
+        font = QFont(title.font())
+        font.setPointSize(font.pointSize() + 3)
+        font.setBold(True)
+        title.setFont(font)
+        header.addWidget(title)
+        header.addStretch()
+        self.state_badge = QLabel("Idle")
+        self.state_badge.setAccessibleName("Receiver connection state")
+        self.state_badge.setMinimumWidth(110)
+        self.state_badge.setAlignment(Qt.AlignCenter)
+        header.addWidget(self.state_badge)
+        root.addLayout(header)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        for title, builders in (
+            ("Listen & record", (self._build_server_box, self._build_tune_box,
+                                 self._build_record_box)),
+            ("Audio", (self._build_audio_box,)),
+            ("Automation", (self._build_rigctl_box, self._build_api_box)),
+        ):
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setSpacing(6)
+            for builder in builders:
+                layout.addWidget(builder())
+            layout.addStretch()
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.NoFrame)
+            scroll.setWidget(page)
+            self.tabs.addTab(scroll, title)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
+        self.statusBar().showMessage("Ready · Select a receiver to begin")
+        self._shortcuts = []
+        for title, keys, callback in (
+            ("Focus receiver", "Ctrl+L", lambda: self._focus_control(self.server_combo)),
+            ("Focus frequency", "Ctrl+F", lambda: self._focus_control(self.freq)),
+            ("Start or stop recording", "Ctrl+R", self.rec_btn.click),
+            ("Connect or disconnect", "Ctrl+Return", self.connect_btn.click),
+        ):
+            action = QAction(title, self)
+            action.setShortcut(QKeySequence(keys))
+            action.triggered.connect(callback)
+            self.addAction(action)
+            self._shortcuts.append(action)
 
         self._load_settings()
         self._timer = QTimer(self, interval=500, timeout=self._tick)
@@ -93,6 +163,15 @@ class MainWindow(QMainWindow):
         if self.api_enable.isChecked():
             self._toggle_api(True)
 
+    def _focus_control(self, widget):
+        self.tabs.setCurrentIndex(0)
+        self.tabs.widget(0).ensureWidgetVisible(widget)
+        widget.setFocus()
+        if hasattr(widget, "selectAll"):
+            widget.selectAll()
+        elif isinstance(widget, QComboBox):
+            widget.lineEdit().selectAll()
+
     # ================================================================== layout
     def _build_server_box(self):
         box = QGroupBox("KiwiSDR server")
@@ -105,16 +184,21 @@ class MainWindow(QMainWindow):
         self.password = QLineEdit(echoMode=QLineEdit.Password, placeholderText="(optional)")
         self.user_name = QLineEdit(placeholderText="shown in the Kiwi user list")
         self.connect_btn = QPushButton("Connect")
+        self.connect_btn.setObjectName("connectAction")
+        self.connect_btn.setToolTip("Connect / disconnect (Ctrl+Return; Command+Return on macOS)")
         self.connect_btn.clicked.connect(self._connect_clicked)
         find_btn = QPushButton("Find receivers…")
         find_btn.setToolTip(PUBLIC_LIST_URL)
         find_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(PUBLIC_LIST_URL)))
-        self.compression = QCheckBox("Compressed audio (ADPCM, ~1/4 the bandwidth)")
+        self.compression = QCheckBox("Compressed audio")
+        self.compression.setToolTip("ADPCM uses about one quarter of the uncompressed bandwidth")
         self.tls = QCheckBox("TLS (https)")
         self.tls.setToolTip("For Kiwis served over https. Without a port, 443 is used.\n"
                             "An https:// address turns this on by itself.")
-        self.conn_label = QLabel("Disconnected")
+        self.conn_label = QLabel("Enter a receiver address, then choose Connect.")
+        self.conn_label.setWordWrap(True)
         self.session_label = QLabel("")
+        self.session_label.setWordWrap(True)
         self.session_label.setStyleSheet("color: gray")
         self.smeter = QProgressBar(minimum=-127, maximum=-13, textVisible=True)
         self.smeter.setFormat("—")
@@ -125,17 +209,17 @@ class MainWindow(QMainWindow):
         g.addWidget(self.connect_btn, 0, 3)
         g.addWidget(QLabel("Password"), 1, 0)
         g.addWidget(self.password, 1, 1)
-        g.addWidget(find_btn, 1, 3)
-        g.addWidget(QLabel("Your name"), 2, 0)
-        g.addWidget(self.user_name, 2, 1)
+        g.addWidget(QLabel("Name"), 1, 2)
+        g.addWidget(self.user_name, 1, 3)
         opts = QHBoxLayout()
         opts.addWidget(self.compression)
         opts.addWidget(self.tls)
         opts.addStretch(1)
-        g.addLayout(opts, 3, 1, 1, 3)
-        g.addWidget(self.conn_label, 4, 0, 1, 3)
-        g.addWidget(self.session_label, 5, 0, 1, 4)
-        g.addWidget(self.smeter, 6, 0, 1, 4)
+        g.addLayout(opts, 2, 1, 1, 2)
+        g.addWidget(find_btn, 2, 3)
+        g.addWidget(self.conn_label, 3, 0, 1, 4)
+        g.addWidget(self.session_label, 4, 0, 1, 4)
+        g.addWidget(self.smeter, 5, 0, 1, 4)
         g.setColumnStretch(1, 1)
         return box
 
@@ -151,7 +235,7 @@ class MainWindow(QMainWindow):
         self.freq.setKeyboardTracking(False)          # commit on Enter / arrows only
         self.freq.setAccelerated(True)
         f = QFont(self.freq.font())
-        f.setPointSize(f.pointSize() + 8)
+        f.setPointSize(f.pointSize() + 5)
         f.setBold(True)
         self.freq.setFont(f)
         self.freq.setMinimumWidth(260)
@@ -232,17 +316,29 @@ class MainWindow(QMainWindow):
         self.rec_dir = QLineEdit()
         self.rec_dir.setToolTip("Also the default folder for recordings started through the API")
         self.rec_dir.editingFinished.connect(self._rec_dir_changed)
-        browse = QPushButton("Folder…")
+        browse = QPushButton("Choose…")
         browse.clicked.connect(self._choose_dir)
         self.rec_btn = QPushButton("● Record")
+        self.rec_btn.setMinimumWidth(100)
+        self.rec_btn.setObjectName("recordAction")
+        self.rec_btn.setToolTip("Start / stop recording (Ctrl+R; Command+R on macOS)")
         self.rec_btn.setCheckable(True)
         self.rec_btn.toggled.connect(self._record_toggled)
-        self.rec_label = QLabel("")
+        self.rec_label = QLabel("Ready to record")
+        self.rec_label.setWordWrap(True)
+        self.rec_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         g.addWidget(QLabel("Format"), 0, 0)
         g.addWidget(self.rec_format, 0, 1, 1, 2)
         g.addWidget(QLabel("Folder"), 1, 0)
         g.addWidget(self.rec_dir, 1, 1)
-        g.addWidget(browse, 1, 2)
+        folder_actions = QHBoxLayout()
+        folder_actions.addWidget(browse)
+        reveal = QPushButton("Open")
+        reveal.setToolTip("Open the recording folder")
+        reveal.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(
+            os.path.abspath(os.path.expanduser(self.rec_dir.text())))))
+        folder_actions.addWidget(reveal)
+        g.addLayout(folder_actions, 1, 2)
         g.addWidget(self.rec_btn, 2, 0)
         g.addWidget(self.rec_label, 2, 1, 1, 2)
         g.setColumnStretch(1, 1)
@@ -334,8 +430,8 @@ class MainWindow(QMainWindow):
         mode = s.value("mode", "USB")
         mode = mode if mode in MODES else "USB"
         pb = s.value("passband", DEFAULT_PASSBAND[mode], type=int)
-        self.radio.set_mode(mode, pb)
-        self.radio.set_frequency(s.value("freq_hz", 7_074_000, type=int))
+        self.service.tune(mode=mode, passband=pb)
+        self.service.tune(freq_hz=s.value("freq_hz", 7_074_000, type=int))
         self._show_tune(self.radio.tune)
         idx = self.step.findData(s.value("step", 1000, type=int))
         self.step.setCurrentIndex(idx if idx >= 0 else 3)
@@ -368,6 +464,8 @@ class MainWindow(QMainWindow):
         geo = s.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
+        if s.value("layout_version", 0, type=int) < 2:
+            self.resize(680, 600)
         if s.value("audio_enable", False, type=bool) and self.device_combo.currentData():
             self.audio_enable.setChecked(True)
 
@@ -403,23 +501,25 @@ class MainWindow(QMainWindow):
         s.setValue("api_port", self.api_port.value())
         s.setValue("api_token", self.api_token.text())
         s.setValue("geometry", self.saveGeometry())
+        s.setValue("layout_version", 2)
 
     # ================================================================== server
     def _connect_clicked(self, *_):
         if self.radio.running or self.connect_btn.text() == "Disconnect":
             self.service.disconnect(reason="ui")
-            self.connect_btn.setText("Connect")
             return
         text = self.server_combo.currentText()
         try:
             spec = ServerSpec.parse(text, self.password.text(), self.user_name.text().strip(),
                                     tls=self.tls.isChecked())
-        except ValueError as e:
+        except (ValueError, ApiError) as e:
             QMessageBox.warning(self, "Server", "Invalid server address: %s" % e)
             return
         self._remember_server(spec.label())
-        self.service.connect(spec, compression=self.compression.isChecked())
-        self.connect_btn.setText("Disconnect")
+        try:
+            self.service.connect(spec, compression=self.compression.isChecked())
+        except (ApiError, RuntimeError) as error:
+            self.statusBar().showMessage(str(error), 8000)
 
     def _server_picked(self, text):
         # History entries carry https:// when they were TLS (ServerSpec.label)
@@ -454,19 +554,19 @@ class MainWindow(QMainWindow):
     @Slot(float)
     def _freq_edited(self, khz):
         try:
-            self.radio.set_frequency(khz * 1000.0)
-        except ValueError as e:
+            self.service.tune(freq_hz=khz * 1000.0)
+        except (ValueError, ApiError) as e:
             self.statusBar().showMessage(str(e), 5000)
             self._show_tune(self.radio.tune)
 
     def _mode_clicked(self, button):
         mode = button.text()
-        self.radio.set_mode(mode, DEFAULT_PASSBAND[mode])
+        self.service.tune(mode=mode, passband=DEFAULT_PASSBAND[mode])
         self._show_tune(self.radio.tune)
 
     @Slot(int)
     def _passband_edited(self, hz):
-        self.radio.set_mode(self.radio.tune.mode, hz)
+        self.service.tune(mode=self.radio.tune.mode, passband=hz)
 
     # ================================================================== audio device
     def _refresh_devices(self, select=None):
@@ -540,7 +640,10 @@ class MainWindow(QMainWindow):
         # The button only asks; the 'recording' event updates it (also for API starts/stops).
         self._set_rec_button(not on)
         if not on:
-            self.service.stop_recording(reason="ui")
+            try:
+                self.service.stop_recording(reason="ui")
+            except (ApiError, OSError, RuntimeError) as error:
+                self.statusBar().showMessage(str(error), 8000)
             return
         st = self.radio.tune
         name = default_recording_name(st.freq_hz, st.mode, self.rec_format.currentData())
@@ -556,6 +659,8 @@ class MainWindow(QMainWindow):
         self.rec_btn.setChecked(active)
         self.rec_btn.setText("■ Stop" if active else "● Record")
         self.rec_btn.blockSignals(False)
+        self.rec_format.setEnabled(not active)
+        self.rec_dir.setEnabled(not active)
 
     # ================================================================== API / policy
     def _policy_changed(self, *_):
@@ -605,7 +710,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.rigctld = RigctldServer(self.radio, self.rig_addr.currentText().strip(),
-                                         self.rig_port.value(), on_activity=self._rig_activity)
+                                         self.rig_port.value(), on_activity=self._rig_activity, service=self.service)
             self.rigctld.start()
         except OSError as e:
             self.rigctld = None
@@ -633,6 +738,7 @@ class MainWindow(QMainWindow):
                                              % (st.freq_hz / 1e3, st.mode, st.passband), 3000)
         elif kind == "status":
             text, level = payload
+            self.statusBar().showMessage(text)
             self.conn_label.setText(text)
             self.conn_label.setStyleSheet("color: #c0392b" if level == "error" else "")
         elif kind == "recording":
@@ -652,6 +758,11 @@ class MainWindow(QMainWindow):
             self._show_session(payload)
         elif kind == "state":
             state = payload[0]
+            self.state_badge.setText(state.capitalize())
+            colors = {"connected": "#166534", "failed": "#b42332", "busy": "#92400e",
+                      "connecting": "#1d4ed8", "reconnecting": "#92400e"}
+            color = colors.get(state, "#475569")
+            self.state_badge.setStyleSheet("background: %s; color: white; border-radius: 10px; padding: 5px 12px" % color)
             info = self.service.session_info() or {}
             idle = state in ("idle", "failed") and "reset_in_progress_s" not in info
             self.connect_btn.setText("Connect" if idle else "Disconnect")

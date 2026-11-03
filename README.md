@@ -1,240 +1,166 @@
-# KiwiSDR Remote
+# KiwiSDR Remote Client
 
-A cross-platform (Windows / macOS / Linux) desktop application for a remote KiwiSDR operation and control.  This is ideal to pass audio data into FLDigi or WSJTX for non amateur radio operators.  
+A receive-only desktop and headless client for remote KiwiSDR receivers. Tune a
+receiver, send its audio to speakers or a virtual cable, and record sessions while
+fldigi, WSJT-X or JS8Call handles decoding.
 
-- Choose the server, frequency, mode (USB / LSB / AM) and bandwidth.
-- Send the audio to any output device. That includes a virtual audio cable, so WSJT-X, fldigi and similar programs can decode it.
-- Record to **WAV** (16-bit PCM at the Kiwi's native ~12 kHz) or **M4A/MP4** (AAC).
-- Built-in **hamlib rigctld server** (NET rigctl, model 2). External programs can read and set the frequency and mode, and the GUI follows those changes.
+This project builds on [jeffreycentex/kiwisdr-remote](https://github.com/jeffreycentex/kiwisdr-remote)
+and uses a pinned copy of [jks-prv/kiwiclient](https://github.com/jks-prv/kiwiclient)
+for the receiver protocol. This repository contains the compact interface and the
+control, recording and security improvements developed from that codebase.
 
-- **Remote-control API** (HTTP/JSON on localhost) for schedulers and scripts. Through it, a program can connect to a server with a password, tune, start and stop WAV recordings, and disconnect. A **headless mode** runs the API, rigctld and recording without a window. Both are described in [docs/API.md](docs/API.md).
-- **Session limits** that keep public Kiwi operators happy: a 15 s reconnect every 2 h, and a 45 min limit for sessions without a password. Kiwis on your own LAN are exempt.
+![Compact light-mode interface](docs/images/main-window.png)
 
-<p align="center">
-  <img src="docs/images/main-window.png" width="520" alt="KiwiSDR Remote main window on macOS: server, tuning, audio output, recording, rigctld and API panels">
-</p>
+## What it does
 
-It uses [jks-prv/kiwiclient](https://github.com/jks-prv/kiwiclient) for the KiwiSDR websocket protocol.
+- **Tune:** USB, LSB and AM, with adjustable bandwidth and receiver-specific frequency limits.
+- **Listen:** output to speakers or a virtual audio cable, with drift correction and resampling.
+- **Record:** native-rate mono WAV, or AAC in M4A/MP4 when PyAV is installed.
+- **Control:** hamlib NET rigctl on `127.0.0.1:4532`, plus an HTTP/JSON API on `127.0.0.1:7373`.
+- **Run headless:** connect, tune and record without loading Qt.
+- **Use a compact desktop:** a 680 × 600 light-mode window with Listen & record, Audio and Automation tabs. Smaller windows scroll; window geometry is saved.
 
-Tested on:
-- Mac OSX Golden Gate using BlackHole
-- Windows 11 26H2 and VB Virtual Audio Cable
-
-```
-             ┌──────────────── KiwiSDR Remote ─────────────────┐
-KiwiSDR ◄─ws─┤ worker thread: KiwiSDRStream (kiwiclient)        │
-             │   SET mod/freq ◄── TuneState ◄── GUI (PySide6)   │
-             │        │                  ▲                      │
-             │        ▼ int16 @ ~12 kHz  └── rigctld TCP :4532 ◄┼── WSJT-X / fldigi / rigctl
-             │   ├─ SoundCardSink → resample + drift lock ──────┼─► VB-Cable / BlackHole / Pulse sink
-             │   └─ WavSink / M4aSink ──────────────────────────┼─► file
-             └──────────────────────────────────────────────────┘
-```
+The GUI, API and hamlib tuning share one service command queue. Recording has a
+separate bounded writer, exclusive file creation, and WAV rotation at 1 GiB.
+Existing recordings are never intentionally replaced, including numbered parts.
 
 ## Install and run
 
-Requires Python 3.10 or newer.
+Requires Python 3.10 or newer. Install dependencies in a virtual environment:
 
 ```bash
-git clone https://github.com/jeffreycentex/kiwisdr-remote.git && cd kiwisdr-remote
+git clone https://github.com/jeffreycentex/kiwisdr-remote-client.git
+cd kiwisdr-remote-client
 python -m venv .venv
-# Windows: .venv\Scripts\activate      macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-python run_kiwiremote.py             # add --debug for protocol/rigctl logging
+# macOS / Linux
+source .venv/bin/activate
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python run_kiwiremote.py
 ```
-On Windows, `requirements.txt` skips `samplerate`, because pip may try to build it from source there. The app then uses linear-interpolation resampling.
 
-Linux only: PortAudio is also required: `sudo apt install libportaudio2` (Debian/Ubuntu) or `sudo dnf install portaudio` (Fedora).
+Linux also needs PortAudio (`sudo apt install libportaudio2` on Debian/Ubuntu)
+and the usual Qt runtime libraries. `samplerate` provides higher-quality
+resampling and is skipped on Windows; linear interpolation is the fallback.
+PyAV supplies M4A/MP4 recording. WAV works without it. `certifi` supplements the
+system TLS trust store.
 
-`samplerate` and `av` are optional. Without `samplerate`, the app falls back to linear-interpolation resampling. Without `av`, the M4A/MP4 formats are greyed out and WAV still works.
+The Python package and launchers retain their original names (`kiwiremote`,
+`run_kiwiremote.py`, and `kiwiremote-cli`) for compatibility. The desktop app is
+still named **KiwiSDR Remote**.
 
-## Virtual audio cable setup
+## Desktop quick start
 
-The app plays into the *input* side of the virtual cable. The decoding program records from the *output* side.
+1. Enter `host:port`, or `https://host[:port]` for a TLS receiver. Supply a receiver password only if needed, then choose **Connect**.
+2. Set frequency in kHz, mode and bandwidth on **Listen & record**.
+3. Choose an output device on **Audio**. For decoding software, select a virtual cable rather than speakers. See [virtual audio setup](docs/VIRTUAL_AUDIO.md).
+4. Select a recording format and folder, then choose **Record**. **Open** reveals the output folder.
+5. Use **Automation** to configure rigctld, the API and session limits.
 
-| OS | Install | In KiwiSDR Remote, play to | In WSJT-X / fldigi, input from |
-|---|---|---|---|
-| Windows | [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) | `CABLE Input (VB-Audio Virtual Cable)` | `CABLE Output (VB-Audio Virtual Cable)` |
-| macOS | [BlackHole](https://existential.audio/blackhole/) (`brew install blackhole-2ch`) | `BlackHole 2ch` | `BlackHole 2ch` |
-| Linux | none. Click **Create 'KiwiSDR' virtual cable**, or run the commands below | `PulseAudio/PipeWire sink: KiwiSDR` | `KiwiSDR-RX` |
+Keyboard shortcuts use Ctrl on Windows/Linux and Command on macOS:
 
-Windows lists every device once per host API (MME, DirectSound, WASAPI). MME or WASAPI both work. The app always opens a device at its default sample rate and resamples to it.
+| Shortcut | Action |
+|---|---|
+| Ctrl/Command+L | Focus receiver address |
+| Ctrl/Command+F | Focus frequency |
+| Ctrl/Command+R | Start or stop recording |
+| Ctrl/Command+Return | Connect or disconnect |
 
-On first start, the app pre-selects a device whose name looks like a virtual cable.
+## Hamlib, API and headless mode
 
-### Linux virtual cable
-
-A Linux virtual cable has two parts:
-
-- A **null sink** called `KiwiSDR`. KiwiSDR Remote plays into it.
-- A **remapped source** called `KiwiSDR_RX`, shown as `KiwiSDR-RX`. It is built from the sink's monitor and is what WSJT-X, JS8Call or fldigi select as **Input**.
-
-The remapped source is needed because WSJT-X and JS8Call list devices through Qt Multimedia, which often hides monitor sources such as "Monitor of KiwiSDR". Without it, the KiwiSDR sink appears under Output but nothing usable appears under Input. For listen-only use, Output can be any device, because nothing is transmitted.
-
-These commands create the cable until the next logout or reboot. The GUI button runs the same commands and skips any part that already exists:
+For WSJT-X or JS8Call, choose rig **Hamlib NET rigctl** and network server
+`127.0.0.1:4532`. This app is receive-only; PTT commands are accepted and ignored.
+For fldigi, enable Hamlib with the same rig and address.
 
 ```bash
-pactl load-module module-null-sink sink_name=KiwiSDR sink_properties=device.description=KiwiSDR
-pactl load-module module-remap-source master=KiwiSDR.monitor source_name=KiwiSDR_RX source_properties=device.description=KiwiSDR-RX
-```
+rigctl -m 2 -r 127.0.0.1:4532 F 7074000
+rigctl -m 2 -r 127.0.0.1:4532 M USB 2800
 
-Restart WSJT-X or JS8Call afterwards, because they only list audio devices at startup.
+# Start the service in one terminal (API always enabled in headless mode).
+python run_kiwiremote.py --headless --record-dir ./recordings
 
-To make it permanent on **PipeWire** (Fedora, Ubuntu 22.10+), create the file `~/.config/pipewire/pipewire-pulse.conf.d/kiwisdr.conf`, then run `systemctl --user restart pipewire-pulse`:
-
-```
-pulse.cmd = [
-  { cmd = "load-module" args = "module-null-sink sink_name=KiwiSDR sink_properties=device.description=KiwiSDR" flags = [ ] }
-  { cmd = "load-module" args = "module-remap-source master=KiwiSDR.monitor source_name=KiwiSDR_RX source_properties=device.description=KiwiSDR-RX" flags = [ ] }
-]
-```
-
-To make it permanent on **PulseAudio**, add these lines to `~/.config/pulse/default.pa`:
-
-```
-.include /etc/pulse/default.pa
-load-module module-null-sink sink_name=KiwiSDR sink_properties=device.description=KiwiSDR
-load-module module-remap-source master=KiwiSDR.monitor source_name=KiwiSDR_RX source_properties=device.description=KiwiSDR-RX
-```
-
-If WSJT-X still shows **no input devices at all**:
-
-- `pactl list short sources` should list `KiwiSDR_RX`. If it doesn't, the module didn't load.
-- A **Flatpak** build needs sound-server access: `flatpak override --user --socket=pulseaudio <app-id>`. A **snap** build needs its `audio-record` interface connected.
-- If Qt uses ALSA rather than Pulse, install `pipewire-alsa`, or `alsa-plugins-pulseaudio` / `libasound2-plugins` on PulseAudio. The `pulse`/`default` input then appears, and you can route it to `KiwiSDR-RX` in `pavucontrol` → Recording.
-
-PortAudio cannot address individual Pulse sinks. The app works around this by opening PortAudio's `pulse` device and setting `PULSE_SINK` to the selected sink. Plain ALSA devices, including `snd-aloop` loopback, appear in the list as normal devices.
-
-## rigctld (CAT control)
-
-The rigctld server is on by default and listens on `127.0.0.1:4532`, the standard hamlib port. Set the address to `0.0.0.0` to allow clients from other machines on your LAN.
-
-**WSJT-X / JTDX / JS8Call:** in Settings → Radio:
-
-- Rig: `Hamlib NET rigctl`
-- Network Server: `127.0.0.1:4532`
-- PTT Method: `VOX`
-- Mode: `None` or `USB`
-- Split: `None`
-
-Click *Test CAT*.
-
-**fldigi:** in Configure → Rig Control → Hamlib, select rig `Hamlib NET rigctl` and set the device to `127.0.0.1:4532`.
-
-**Command line:**
-
-```bash
-rigctl -m 2 -r 127.0.0.1:4532 F 14074000   # set frequency
-rigctl -m 2 -r 127.0.0.1:4532 M USB 2800   # set mode + passband
-rigctl -m 2 -r 127.0.0.1:4532 f m l STRENGTH
-```
-
-Supported commands:
-
-- `f/F` get/set frequency
-- `m/M` get/set mode and passband
-- `v/V`, `s/S`, `t/T`: compatibility stubs (receive only, PTT accepted and ignored)
-- `l STRENGTH`: S-meter in dB relative to S9
-- `\dump_state`, `\chk_vfo`, `\get_powerstat`
-- `+` extended responses
-- A leading VFO argument (`f VFOA`, `l VFOA STRENGTH`, `\set_freq currVFO 7074000`), as sent by fldigi and other VFO-mode clients, is accepted and ignored.
-
-Mode mapping: `PKTUSB`/`USBD` map to USB, `PKTLSB` to LSB, `SAM`/`AMS` to AM. Other modes return `RPRT -11`. Changes made through rigctl update the GUI immediately and are applied to the Kiwi whether or not it is connected at that moment.
-
-## Remote-control API and headless mode
-
-The API is turned on in the GUI under *Remote control API and session limits*, and is always on in headless mode. It listens only on `127.0.0.1:7373`:
-
-```bash
-python run_kiwiremote.py ctl connect kiwi.example.net:8073 --password secret --wait 10
-python run_kiwiremote.py ctl record-start --name "{date}_texas_net" --max-seconds 5400
+# Control it from another terminal.
+python run_kiwiremote.py ctl connect kiwi.example.net:8073 --wait 10
+python run_kiwiremote.py ctl tune --khz 7074 --mode USB
+python run_kiwiremote.py ctl record-start --name "{date}_net" --max-seconds 3600
 python run_kiwiremote.py ctl record-stop
 python run_kiwiremote.py ctl disconnect
-
-python run_kiwiremote.py --headless --record-dir ~/net-recordings     # no window, no Qt needed
 ```
 
-The GUI shows every change the API makes. If the recording drops out during a reconnect, silence is inserted for the gap, so a position in the WAV file still matches the clock time.
+The GUI enables the API on the Automation tab. All interfaces share tuning and
+recording state. See [the API reference](docs/API.md) for endpoints, authentication,
+error codes, filename templates and resource limits.
 
-When fldigi's rig control points at the rigctld here, a scheduler that tunes fldigi also tunes the Kiwi. The API then only has to choose the server and handle recording. The full reference, covering endpoints, errors, the session policy and the security model, is in **[docs/API.md](docs/API.md)**.
+## Connections, recordings and security
 
-## Behaviour notes
+- Connections retry after 5 seconds, or after 15 seconds when the receiver is busy. A bad password or invalid TLS certificate stops retries.
+- TLS verifies certificates. Redirects cannot downgrade TLS to plaintext or forward a password to a different hostname or port. Connect explicitly to the destination if you trust it.
+- Both control services default to loopback. The HTTP API requires a token for non-loopback binding, but remains plaintext; rigctld has no authentication. Use an authenticated encrypted tunnel for remote access.
+- Browser protections require JSON POST bodies and an allowed Host header; the API does not enable CORS. Request sizes, client counts and WebSocket messages are bounded.
+- Recording filenames are reserved atomically. A sample-rate change creates a new part; WAV also rotates at 1 GiB of PCM data. M4A/MP4 uses mono AAC at 48 kHz and 64 kbit/s.
+- WAV reconnect gaps are filled with silence, up to 30 minutes per gap. M4A/MP4 does not insert reconnect silence. Storage overload stops recording with an error rather than silently dropping queued audio.
+- Receiver passwords are neither saved nor included in application status or authentication logs. An optional API token is stored in Qt settings; protect access to your user account and settings files.
 
-- **Passband.** SSB uses a 200 Hz low edge plus the bandwidth (default 2800 Hz, giving 200–3000 Hz). AM is symmetric (default ±4900 Hz). A rigctl passband of 0 means the mode's default.
-- **Clock drift.** The Kiwi's sample clock and your sound card's clock differ by tens to hundreds of ppm. A PI controller holds the output buffer at 200 ms (measured when an on-time packet arrives) by trimming the resampling ratio, by at most ±0.5 %. The trim settles to the true clock offset within a few minutes. Network jitter moves the pitch by much less than 0.1 %, about 1 Hz at a 1500 Hz FT8 tone. The current trim and buffer level are shown under the device selector.
-- **Output blocks.** The device is opened with ~20 ms callback blocks and ~100 ms of device latency. Smaller blocks (e.g. BlackHole's 1.3 ms minimum) cannot be served reliably from Python. Gaps after an underrun are faded in and out, and gain above 100 % goes through a soft limiter instead of hard clipping.
-- **Network jitter.** Kiwi packets carry up to 170 ms of audio and arrive with jitter. The buffer level is corrected by each packet's lateness, so jitter doesn't disturb the trim. After a network stall, the late backlog is dropped when playback resumes, so the stall can't wind up the trim.
-- **Reconnects.** If the connection drops, the app reconnects after 5 s. If all channels are busy, it retries every 15 s. A bad password stops retrying.
-- **Frequency range** is taken from the server after connecting. This also covers Kiwis with a configured frequency offset (transverter or LF setups). An out-of-range request is clamped and reported.
-- **TLS.** Tick **TLS (https)**, or type the server as `https://host[:port]`, for a Kiwi served over https (often one behind a reverse proxy). Without a port, 443 is used. The certificate is checked against the system's trust store, plus [certifi](https://pypi.org/project/certifi/)'s bundle when it is installed. An untrusted certificate, or TLS asked of a server that doesn't speak it, stops the connection with a message instead of retrying. HTTP redirects to an `https://` address are followed over TLS.
-- **Compressed audio (ADPCM)** is on by default, as in the Kiwi web UI. Turning it off uses about 4× the bandwidth (192 kbit/s) but is lossless. The setting applies on the next connect.
-- **WAV** files are written at the Kiwi's integer sample rate (12001 Hz, say). If you change server mid-recording and the rate changes, a new `_1.wav` part is started. Classic WAV is limited to 4 GB, which is about 49 hours of mono audio at 12 kHz.
-- **M4A/MP4** files are AAC mono, 64 kbit/s, 48 kHz, encoded with PyAV's bundled FFmpeg.
-- Settings are saved between runs with QSettings: server history, frequency, mode, device, folder and rigctld settings. Passwords are not saved.
+Default session policy: sessions without a password end after 45 minutes;
+passworded sessions have no session limit. A periodic reset disconnects for
+15 seconds every 120 minutes, retaining a running recording. Local receivers
+(loopback, private or link-local connected peer addresses) are exempt. Per-connect
+overrides take precedence; zero disables a limit or reset. See the API reference
+for exact timer behavior.
 
-## Tests
+## Tests and validation
 
 ```bash
+python -m pip install numpy
 python -m unittest discover -s tests -v
 ```
 
-The tests are headless and need no audio hardware or real Kiwi. They cover:
+The minimal suite uses a fake KiwiSDR and requires no audio hardware. Real Qt GUI
+and PyAV recording tests run when those dependencies are installed; otherwise they
+are skipped. Qt tests run offscreen with isolated settings. CI runs the suite on
+Linux, Windows and macOS with Python 3.10 and 3.13.
 
-- A fake KiwiSDR websocket server (`tests/fake_kiwi.py`) sending ADPCM-compressed and uncompressed audio. The tests connect, tune via the GUI API and via rigctl, check the exact `SET mod=` commands, test auto-reconnect and the busy-server path, and check the recorded WAV content.
-- The rigctld protocol: short, long and extended forms, `dump_state`, multiple commands per line, and VFO arguments.
-- The resampler's continuity and length accuracy.
-- A simulated-time run of the drift controller with sound-card clocks at ±300 ppm.
-- The service and API (`tests/test_api.py`): the session limit, periodic reset and local exemption, run on a simulated clock; gap filling; recording names; HTTP status and error codes; the token, `Host`-header and content-type protections; the `ctl` client; and headless mode shutting down cleanly on a signal with a finalized WAV.
+This client has been validated locally on macOS with real Qt and PyAV, a standalone
+app build, and live tuning/WAV recording against
+`newbraunfels.proxy.kiwisdr.com:8073`. That verifies receiving and recording;
+physical audio devices and decoder applications still need testing on each system.
 
-GitHub Actions runs these tests on Linux, Windows and macOS for every push and pull request (`.github/workflows/ci.yml`).
-
-## Building standalone apps
-
-**GitHub Actions** (`.github/workflows/build.yml`) builds Windows x64, macOS (Apple silicon) and Linux x64 archives:
-
-- **On demand:** Actions → *Build* → *Run workflow*. The archives appear as artifacts on the run.
-- **Release:** push a tag such as `v0.2.0` (`git tag v0.2.0 && git push origin v0.2.0`). A GitHub release is created with the archives attached.
-
-To build locally, run this on each target OS (PyInstaller does not cross-compile):
+## Build standalone apps
 
 ```bash
-pip install pyinstaller
-python fetch_kiwiclient.py
-pyinstaller kiwiremote.spec
+python -m pip install -r requirements.txt pyinstaller
+pyinstaller --noconfirm kiwiremote.spec
 ```
 
-Each build contains two programs:
+The pinned kiwiclient sources are included; downloading them again is unnecessary.
+Use `python fetch_kiwiclient.py` only when intentionally refreshing that copy.
+PyInstaller builds for the current OS; it does not cross-compile.
 
-- `KiwiSDR Remote`: the GUI. `KiwiSDR Remote.exe` on Windows; `KiwiSDR Remote.app` on macOS, which is unsigned, so right-click → Open the first time.
-- `kiwiremote-cli`: a console program for `--headless` and `ctl`. Windows GUI programs have no console, so this is the one to use for those modes there.
+Outputs include a windowed **KiwiSDR Remote** and console **kiwiremote-cli** in
+`dist/`. On macOS, the GUI is `dist/KiwiSDR Remote.app`. Local macOS builds are
+ad-hoc signed and not notarized. GitHub Actions can build Windows x64, macOS Apple
+silicon and Linux x64 archives through the **Build** workflow. Publishing a `v*`
+tag triggers a release; normal pushes do not create releases.
 
-On Linux, the target machine also needs `libportaudio2`, plus the usual Qt runtime libraries for the GUI.
+## Code layout
 
-## Licensing
+| Path | Purpose |
+|---|---|
+| `kiwiremote/gui.py` | Light-mode desktop, settings and queued Qt events |
+| `kiwiremote/service.py` | Qt-free session policy and application operations |
+| `kiwiremote/commands.py` | Bounded command queue with one owner thread |
+| `kiwiremote/radio.py` | Kiwi transport, TLS, redirects, reconnects and audio delivery |
+| `kiwiremote/sinks.py` | Playback, buffered recording, file parts and resampling integration |
+| `kiwiremote/api.py`, `ctl.py`, `headless.py` | HTTP server, CLI client and headless launcher |
+| `kiwiremote/rigctld.py`, `network.py` | Hamlib adapter and bounded control connections |
+| `kiwiremote/state.py`, `resample.py` | Tune/server models and streaming resampling |
+| `tests/` | Fake receiver and unit/integration tests |
+| `AGENTS.md` | Contributor and agent guidance |
 
-KiwiSDR Remote is free software, licensed under the **GNU General Public License v3.0 or later**. See [LICENSE](LICENSE).
+## License and attribution
 
-`third_party/kiwiclient` is a pinned copy of [jks-prv/kiwiclient](https://github.com/jks-prv/kiwiclient). It is included so the repo works right after cloning, and its files keep their own licenses: parts are GPL-2.0-or-later, and `mod_pywebsocket` is BSD. This app does not use kiwiclient's rigctld; it has its own implementation in `kiwiremote/rigctld.py`.
-
-## Layout
-
-```
-run_kiwiremote.py        launcher / PyInstaller entry
-fetch_kiwiclient.py      downloads kiwiclient into third_party/
-kiwiremote/
-  gui.py                 PySide6 main window (drives service.py)
-  service.py             Qt-free service: connect/tune/record, session policy, timers
-  api.py                 HTTP/JSON API (/api/v1), localhost + token + browser protections
-  ctl.py                 'ctl' command-line client and ApiClient for other programs
-  headless.py            --headless entry: service + API + rigctld, no Qt
-  radio.py               connection worker, controller API, reconnect logic
-  rigctld.py             hamlib NET rigctl server
-  sinks.py               sound-card (drift-locked), WAV and M4A/MP4 outputs
-  resample.py            streaming resampler (libsamplerate or linear)
-  state.py               tune/server models, mode and passband rules
-  kiwi_import.py         locates kiwiclient
-tests/                   fake Kiwi server + unit/integration tests
-docs/API.md              API reference
-.github/workflows/       CI tests and PyInstaller builds
-CLAUDE.md                notes for Claude / contributors
-```
+Licensed under **GPL-3.0-or-later**; see [LICENSE](LICENSE). This project retains
+history and attribution from [KiwiSDR Remote](https://github.com/jeffreycentex/kiwisdr-remote).
+Vendored [kiwiclient](https://github.com/jks-prv/kiwiclient) sources retain their own
+licenses: parts are GPL-2.0-or-later and `mod_pywebsocket` is BSD. Keep upstream
+copyright and license notices when redistributing source or binaries.

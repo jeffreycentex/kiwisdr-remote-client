@@ -14,6 +14,7 @@ M4aSink         -> AAC in an MP4 container (.m4a / .mp4) via PyAV (optional depe
 import collections
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -450,6 +451,16 @@ def _numbered(path, n):
     return "%s_%d%s" % (root, n, ext)
 
 
+def _reserve_file(path, part=0):
+    """Reserve the next available part atomically, including dangling symlinks."""
+    while True:
+        candidate = _numbered(path, part)
+        try:
+            return candidate, open(candidate, "xb"), part
+        except FileExistsError:
+            part += 1
+
+
 class WavSink:
     """16-bit mono PCM at the Kiwi's native rate (typically ~12 kHz).
 
@@ -463,7 +474,8 @@ class WavSink:
         self._rate = None
         self._part = 0
         self.frames = 0
-        self.current_path = None
+        self.current_path, self._file, self._part = _reserve_file(path)
+        self._elapsed = 0.0
 
     def set_input_rate(self, rate):
         rate = int(round(rate))
@@ -471,20 +483,31 @@ class WavSink:
             return
         if self._wav is not None:
             self._wav.close()
+            self._file.close()
             self._part += 1
+            self.current_path, self._file, self._part = _reserve_file(self.path, self._part)
         self._rate = rate
-        self.current_path = _numbered(self.path, self._part)
-        self._wav = wave.open(self.current_path, "wb")
+        self._wav = wave.open(self._file, "wb")
         self._wav.setnchannels(1)
         self._wav.setsampwidth(2)
         self._wav.setframerate(rate)
         log.info("recording WAV %s at %d Hz", self.current_path, rate)
 
+    MAX_DATA_BYTES = 1024 * 1024 * 1024
+
     def write(self, samples):
         if self._wav is None:
             return
+        if self._wav.getnframes() * 2 + len(samples) * 2 > self.MAX_DATA_BYTES:
+            self._wav.close()
+            self._file.close()
+            self._wav = None
+            self._part += 1
+            self.current_path, self._file, self._part = _reserve_file(self.path, self._part)
+            self.set_input_rate(self._rate)
         self._wav.writeframesraw(samples.astype("<i2", copy=False).tobytes())
         self.frames += len(samples)
+        self._elapsed += len(samples) / self._rate
 
     @property
     def rate(self):
@@ -497,17 +520,20 @@ class WavSink:
         block = np.zeros(min(n, self._rate * 10), dtype="<i2").tobytes()
         while n > 0:
             k = min(n, len(block) // 2)
-            self._wav.writeframesraw(block[:2 * k])
-            self.frames += k
+            self.write(np.frombuffer(block[:2 * k], dtype="<i2"))
             n -= k
 
     def seconds(self):
-        return self.frames / self._rate if self._rate else 0.0
+        return self._elapsed
 
     def close(self):
         if self._wav is not None:
-            self._wav.close()   # patches the RIFF header sizes
-            self._wav = None
+            try:
+                self._wav.close()   # patches the RIFF header sizes
+            finally:
+                self._wav = None
+                self._file.close()
+        self._file.close()
 
 
 class M4aSink:
@@ -527,7 +553,8 @@ class M4aSink:
         self._pts = 0
         self._part = 0
         self.frames = 0
-        self.current_path = None
+        self.current_path, self._file, self._part = _reserve_file(path)
+        self._elapsed = 0.0
 
     def set_input_rate(self, rate):
         rate = int(round(rate))
@@ -536,10 +563,10 @@ class M4aSink:
         if self._container is not None:
             self._finish()
             self._part += 1
+            self.current_path, self._file, self._part = _reserve_file(self.path, self._part)
         self._in_rate = rate
         self._pts = 0
-        self.current_path = _numbered(self.path, self._part)
-        self._container = av.open(self.current_path, mode="w", format="mp4")
+        self._container = av.open(self._file, mode="w", format="mp4")
         self._stream = self._container.add_stream("aac", rate=self.OUT_RATE)
         cc = self._stream.codec_context
         try:
@@ -560,12 +587,13 @@ class M4aSink:
         frame.time_base = Fraction(1, self._in_rate)
         self._pts += arr.shape[1]
         self.frames += arr.shape[1]
+        self._elapsed += arr.shape[1] / self._in_rate
         for f in self._resampler.resample(frame):
             for packet in self._stream.encode(f):
                 self._container.mux(packet)
 
     def seconds(self):
-        return self.frames / self._in_rate if self._in_rate else 0.0
+        return self._elapsed
 
     def _finish(self):
         try:
@@ -577,18 +605,104 @@ class M4aSink:
         finally:
             self._container.close()
             self._container = None
+            self._file.close()
 
     def close(self):
         if self._container is not None:
             self._finish()
+        self._file.close()
+
+
+class BufferedFileSink:
+    """Bounded recording writer. Overflow fails visibly instead of losing audio silently."""
+    MAX_BYTES = 4 * 1024 * 1024
+
+    def __init__(self, sink):
+        self._sink = sink
+        self.supports_silence = hasattr(sink, "write_silence")
+        self.path = sink.path
+        self._queue = queue.Queue(maxsize=256)
+        self._error = None
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, name="kiwi-recording", daemon=True)
+        self._thread.start()
+
+    @property
+    def current_path(self):
+        return self._sink.current_path
+
+    @property
+    def rate(self):
+        return self._sink.rate if hasattr(self._sink, "rate") else self._sink._in_rate
+
+    def _submit(self, method, value, wait=False, size=0):
+        from concurrent.futures import Future
+        future = Future() if wait else None
+        with self._lock:
+            if self._error is not None:
+                raise RuntimeError("recording writer failed: %s" % self._error)
+            if self._bytes + size > self.MAX_BYTES:
+                raise RuntimeError("recording storage cannot keep up with audio")
+            self._bytes += size
+            try:
+                self._queue.put_nowait((method, value, future, size))
+            except queue.Full:
+                self._bytes -= size
+                raise RuntimeError("recording storage cannot keep up with audio")
+        if future is not None:
+            future.result()
+
+    def _run(self):
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            method, value, future, size = item
+            try:
+                if self._error is not None:
+                    raise RuntimeError(str(self._error))
+                getattr(self._sink, method)(value)
+            except Exception as exc:
+                with self._lock:
+                    self._error = exc
+                if future is not None:
+                    future.set_exception(exc)
+            else:
+                if future is not None:
+                    future.set_result(None)
+            finally:
+                with self._lock:
+                    self._bytes -= size
+
+    def set_input_rate(self, rate):
+        self._submit("set_input_rate", rate, wait=True)
+
+    def write(self, samples):
+        self._submit("write", samples.copy(), size=samples.nbytes)
+
+    def write_silence(self, seconds):
+        if hasattr(self._sink, "write_silence"):
+            self._submit("write_silence", seconds, wait=True)
+
+    def seconds(self):
+        return self._sink.seconds()
+
+    def close(self):
+        if self._thread.is_alive():
+            self._queue.put(None)
+            self._thread.join()
+        self._sink.close()
+        if self._error is not None:
+            raise RuntimeError("recording writer failed: %s" % self._error)
 
 
 def make_file_sink(path):
     ext = os.path.splitext(path)[1].lower()
     if ext == ".wav":
-        return WavSink(path)
+        return BufferedFileSink(WavSink(path))
     if ext in (".m4a", ".mp4", ".aac"):
-        return M4aSink(path if ext != ".aac" else os.path.splitext(path)[0] + ".m4a")
+        return BufferedFileSink(M4aSink(path if ext != ".aac" else os.path.splitext(path)[0] + ".m4a"))
     raise ValueError("unsupported file type %r (use .wav, .m4a or .mp4)" % ext)
 
 

@@ -24,6 +24,9 @@ import socket
 import socketserver
 import threading
 
+from .network import BoundedConnections
+from .state import normalize_mode
+
 log = logging.getLogger(__name__)
 
 RPRT_OK = "RPRT 0\n"
@@ -77,14 +80,17 @@ def _dump_state(max_hz):
 
 
 class _Handler(socketserver.StreamRequestHandler):
-    timeout = None
+    timeout = 120.0
 
     def handle(self):
         srv = self.server.owner
         peer = "%s:%s" % self.client_address[:2]
         srv._client_count(+1, peer)
         try:
-            for raw in self.rfile:
+            while True:
+                raw = self.rfile.readline(4097)
+                if not raw or len(raw) > 4096:
+                    break
                 try:
                     text = raw.decode("ascii", "replace").strip("\r\n")
                 except Exception:
@@ -103,7 +109,7 @@ class _Handler(socketserver.StreamRequestHandler):
             srv._client_count(-1, peer)
 
 
-class _TCPServer(socketserver.ThreadingTCPServer):
+class _TCPServer(BoundedConnections, socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
@@ -113,8 +119,9 @@ class _TCPServer6(_TCPServer):
 
 
 class RigctldServer:
-    def __init__(self, controller, host="127.0.0.1", port=4532, on_activity=None):
+    def __init__(self, controller, host="127.0.0.1", port=4532, on_activity=None, service=None):
         self.controller = controller
+        self.service = service
         self.host = host
         self.port = int(port)
         self._on_activity = on_activity or (lambda kind, payload: None)
@@ -231,7 +238,10 @@ class RigctldServer:
             return [("Frequency", "%d" % c.tune.freq_hz)], 0
         if cmd == "set_freq":
             hz = float(args[0])
-            c.set_frequency(hz, source="rigctl")
+            if self.service is not None:
+                self.service.tune(freq_hz=hz, source="rigctl")
+            else:
+                c.set_frequency(hz, source="rigctl")
             self._on_activity("command", "F %.0f" % hz)
             return [], 0
         if cmd == "get_mode":
@@ -243,7 +253,12 @@ class RigctldServer:
             if pb < 0:                    # RIG_PASSBAND_NOCHANGE
                 pb = None
             try:
-                c.set_mode(mode, pb, source="rigctl")
+                if normalize_mode(mode) is None:
+                    raise ValueError("unsupported mode")
+                if self.service is not None:
+                    self.service.tune(mode=mode, passband=pb, source="rigctl")
+                else:
+                    c.set_mode(mode, pb, source="rigctl")
             except ValueError:
                 log.info("rigctl: unsupported mode %s", mode)
                 return [], -11

@@ -24,6 +24,7 @@ The base URL is `http://127.0.0.1:7373/api/v1`.
 - Request and response bodies are JSON. **POST requests must send `Content-Type: application/json`**, even with an empty body (`{}`).
 - Every response has `"ok": true` or `"ok": false`. Errors also carry `{"error": {"code": "...", "message": "..."}}`. The `code` values are stable and safe to branch on; the `message` is for people to read.
 - Frequencies are in Hz (`freq_hz`). `/tune` also accepts `freq_khz`.
+- Numbers must be finite; `NaN` and infinity are rejected before changing application state.
 - Times are in seconds. Session-policy values are in minutes, where `0` means off.
 - An incompatible future version would be added as `/api/v2` next to `/api/v1`. New fields may appear in v1 responses, so clients should ignore keys they don't know.
 
@@ -33,7 +34,8 @@ The base URL is `http://127.0.0.1:7373/api/v1`.
 | 401 | `unauthorized` | a token is configured, and the request's token is missing or wrong |
 | 403 | `forbidden_host` | the `Host` header isn't `localhost`, `127.0.0.1` or `[::1]` |
 | 404 / 405 | `not_found`, `method_not_allowed` | unknown path, or wrong HTTP method |
-| 409 | `conflict` | a recording is already running |
+| 408 | `timeout` | a request read exceeded its timeout |
+| 409 | `conflict` | a recording is already running, or a previous receiver is still stopping |
 | 413 / 415 | `too_large`, `unsupported_media_type` | the body is over 64 KB, or isn't JSON |
 | 500 | `io_error`, `internal_error` | the file can't be written, or an unexpected error |
 | 502 / 503 / 504 | `connect_failed`, `busy`, `timeout` | outcomes of `/connect` when called with `wait` |
@@ -210,3 +212,30 @@ Headless mode runs the API, rigctld and recording without a window and without Q
 - the policy flags: `--limit-password-min`, `--limit-public-min`, `--reset-interval-min`, `--reset-pause-s`, `--no-local-exempt`
 
 Ctrl+C or SIGTERM (Ctrl+Break on Windows) shuts down cleanly and finalizes the WAV file. Killing the process with `kill -9` or Task Manager leaves the WAV header without its final length.
+
+## Local build behavior
+
+GUI, HTTP and rigctld tuning/recording commands share one bounded service command
+queue. Waiting for a connection does not block disconnect or session timers.
+Concurrent recording starts have one winner; the other requests return `conflict`.
+
+Recordings reserve every filename exclusively, including parts created after a
+sample-rate change. WAV files rotate at 1 GiB of PCM data. Recording storage runs
+on a separate writer with at most 256 pending operations and 4 MiB of queued audio;
+overflow stops recording with an error instead of silently dropping samples.
+Stopping recording drains queued audio and finalizes the file before replying.
+Recording names accept simple `{date}`, `{time}`, `{freq_khz}`, `{mode}` and
+`{server}` substitutions, with no format specifications or attribute/index access.
+
+TLS connections reject redirects to plaintext. Passwords are not forwarded when
+redirects change the hostname or port: connect explicitly to the destination if
+you trust it. Public receivers without passwords may still redirect across hosts.
+
+Both control listeners accept up to 32 simultaneous clients. HTTP reads time out
+after 10 seconds; rigctld idle reads time out after 120 seconds and command lines
+are limited to 4096 bytes. HTTP rejects negative/duplicate lengths, bodies over
+64 KiB and transfer encodings. WebSocket frames/messages are limited to 1 MiB and
+1024 fragments. These limits also apply when using a token.
+
+The HTTP API remains plaintext and rigctld has no authentication. Keep listeners
+on loopback, or put remote access behind an authenticated encrypted tunnel.

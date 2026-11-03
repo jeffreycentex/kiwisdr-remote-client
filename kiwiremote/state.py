@@ -129,4 +129,5 @@ class ServerSpec:
 
     def label(self):
         """'host:port', or 'https://host:port' with TLS (parse() reads it back)."""
-        return "%s%s:%d" % ("https://" if self.tls else "", self.host, self.port)
+        host = "[%s]" % self.host if ":" in self.host else self.host
+        return "%s%s:%d" % ("https://" if self.tls else "", host, self.port)

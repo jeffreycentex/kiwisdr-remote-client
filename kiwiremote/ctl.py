@@ -47,6 +47,8 @@ class ApiClient:
                 return e.code, json.loads(e.read() or b"{}")
             except ValueError:
                 return e.code, {"ok": False, "error": {"code": "http_%d" % e.code, "message": str(e)}}
+            finally:
+                e.close()
 
     def status(self):
         return self.request("GET", "/status")

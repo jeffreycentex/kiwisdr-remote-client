@@ -14,7 +14,6 @@ Threading model
 """
 
 import logging
-import re
 import socket
 import ssl
 import threading
@@ -58,6 +57,28 @@ class KiwiRedirectLoopError(K.KiwiDownError):
 class KiwiTlsError(K.KiwiDownError):
     """The TLS handshake failed: an untrusted certificate, or TLS chosen for a
     server that doesn't speak it. Retrying won't help, so the worker gives up."""
+
+
+def _check_redirect(host, port, tls, new_host, new_port, new_tls, password):
+    if tls and not new_tls:
+        raise KiwiTlsError("Refusing an unencrypted redirect from a TLS receiver")
+    if password and (host.lower().rstrip("."), port) != (new_host.lower().rstrip("."), new_port):
+        raise KiwiTlsError("Refusing to forward a password to another receiver; connect to it explicitly")
+
+
+class _BoundedStream(K.Stream):
+    MAX_MESSAGE = 1024 * 1024
+
+    def receive_bytes(self, length):
+        if length > self.MAX_MESSAGE:
+            raise ConnectionTerminatedException("WebSocket frame exceeds 1 MiB")
+        return super().receive_bytes(length)
+
+    def _get_message_from_frame(self, frame):
+        size = sum(len(f) for f in self._received_fragments) + len(frame.payload)
+        if size > self.MAX_MESSAGE or len(self._received_fragments) >= 1024:
+            raise ConnectionTerminatedException("WebSocket message exceeds limits")
+        return super()._get_message_from_frame(frame)
 
 
 def _tls_context():
@@ -143,13 +164,17 @@ class _KiwiAudioStream(K.KiwiSDRStream):
             if status_code == "101":
                 break
             self._socket.close()
+            old_host, old_port, old_tls = host, port, tls
             u = urlparse(location)
+            if u.scheme and u.scheme not in ("http", "https", "ws", "wss"):
+                raise KiwiTlsError("Unsupported redirect scheme")
             if u.scheme in ("http", "ws", "https", "wss"):
                 tls = u.scheme in ("https", "wss")
                 port = u.port or (443 if tls else 80)
             else:
                 port = u.port or port
             host = u.hostname or host
+            _check_redirect(old_host, old_port, old_tls, host, port, tls, self._options.password)
             log.warning("HTTP %s redirect to %s%s:%s", status_code, "https://" if tls else "", host, port)
 
         request = K.ClientRequest(self._socket)
@@ -157,19 +182,21 @@ class _KiwiAudioStream(K.KiwiSDRStream):
         stream_option = K.StreamOptions()
         stream_option.mask_send = True
         stream_option.unmask_receive = False
-        self._stream = K.Stream(request, stream_option)
+        self._stream = _BoundedStream(request, stream_option)
 
     # kiwiclient logs every command at debug level, including the password in
     # 'SET auth'. Send that one ourselves with the password masked in the log.
     def _send_message(self, msg):
         if msg.startswith("SET auth"):
-            log.debug("send SET (%s) \"%s\"", self._stream_name, re.sub(r" (p|ipl)=\S*", r" \1=***", msg))
+            log.debug("send SET auth (%s) [credentials redacted]", self._stream_name)
             self._stream.send_message(msg)
             return
         super()._send_message(msg)
 
     # Called by kiwiclient when the server sends sample_rate (start of audio).
     def _setup_rx_params(self):
+        if self._stop_event.is_set():
+            raise K.KiwiConnectionError("connection cancelled")
         self.set_name(self._options.user)
         self.apply_tune(self._owner.tune)
         self.set_agc(on=True)
@@ -200,7 +227,8 @@ class _KiwiAudioStream(K.KiwiSDRStream):
         super()._process_aud(body)
 
     def _process_audio_samples(self, seq, samples, rssi, fmt):
-        self._owner._on_audio(samples, rssi)
+        if not self._stop_event.is_set():
+            self._owner._on_audio(samples, rssi)
 
     def _on_sample_rate_change(self):
         pass
@@ -309,6 +337,8 @@ class RadioController:
     # ------------------------------------------------------------------ connection
     def connect(self, server: ServerSpec):
         self.disconnect()
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("previous receiver connection is still stopping; retry shortly")
         self._server = server
         self.reconnects = 0
         self._set_state(CONNECTING)
@@ -330,7 +360,8 @@ class RadioController:
             except OSError:
                 pass
         t.join(timeout)
-        self._thread = None
+        if not t.is_alive():
+            self._thread = None
         if self.state != FAILED:
             self._set_state(IDLE)
 
@@ -359,6 +390,8 @@ class RadioController:
                 stream = _KiwiAudioStream(opts, self, stop)
                 self._stream = stream
                 stream.connect(server.host, server.port)
+                if stop.is_set():
+                    break
                 stream.open()
                 while not stop.is_set():
                     if stream.rx_ready and self._dirty:
@@ -384,6 +417,11 @@ class RadioController:
                 if u.hostname:
                     tls = u.scheme in ("https", "wss") if u.scheme else server.tls
                     port = u.port or (server.port if tls == server.tls else 443 if tls else 8073)
+                    try:
+                        _check_redirect(server.host, server.port, server.tls, u.hostname, port, tls, server.password)
+                    except KiwiTlsError as error:
+                        failed = str(error)
+                        break
                     server = ServerSpec(u.hostname, port, server.password, server.user, tls)
                     self._server = server
                     self._status("Redirected to %s" % server.label())
@@ -446,7 +484,8 @@ class RadioController:
         arrived, so positions in the file keep matching wall-clock time."""
         sink = self._sinks.get("file")
         last, self._last_audio = self._last_audio, None
-        if sink is None or last is None or not hasattr(sink, "write_silence"):
+        if (sink is None or last is None or not hasattr(sink, "write_silence")
+                or not getattr(sink, "supports_silence", True)):
             return
         gap = time.monotonic() - last
         if gap < 0.5:

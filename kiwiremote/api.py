@@ -21,6 +21,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import socket
 import socketserver
 import threading
@@ -28,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import __version__
 from .service import ApiError
+from .network import BoundedConnections
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +57,12 @@ def _num(body, key, kind=float):
         return None
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         raise ApiError("bad_request", "%s must be a number" % key)
-    return kind(v)
+    try:
+        if not math.isfinite(v):
+            raise ValueError("non-finite")
+        return kind(v)
+    except (ValueError, OverflowError):
+        raise ApiError("bad_request", "%s must be a finite number in range" % key)
 
 
 def _str(body, key):
@@ -70,6 +77,7 @@ def _str(body, key):
 class _Handler(BaseHTTPRequestHandler):
     server_version = "KiwiSDR-Remote/%s" % __version__
     protocol_version = "HTTP/1.1"
+    timeout = 10.0
 
     # quiet default logging; route through logging at debug level
     def log_message(self, fmt, *args):
@@ -86,6 +94,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _error(self, status, code, message):
+        self.close_connection = True
         self._send(status, {"ok": False, "error": {"code": code, "message": message}})
 
     def _check_access(self):
@@ -107,12 +116,24 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _body(self):
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            raise ApiError("bad_request", "Transfer-Encoding is not supported")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) > 1 or (lengths and not lengths[0].isascii()) or (lengths and not lengths[0].isdigit()):
+            self.close_connection = True
+            raise ApiError("bad_request", "invalid Content-Length")
+        if lengths and len(lengths[0]) > 10:
             raise ApiError("too_large", "request body too large", 413)
-        raw = self.rfile.read(length) if length else b""
+        length = int(lengths[0]) if lengths else 0
+        if length > MAX_BODY:
+            self.close_connection = True
+            raise ApiError("too_large", "request body too large", 413)
         if ctype != "application/json":
             raise ApiError("unsupported_media_type", "POST bodies must be application/json", 415)
+        raw = self.rfile.read(length) if length else b""
+        if len(raw) != length:
+            raise ApiError("bad_request", "incomplete request body")
         if not raw.strip():
             return {}
         try:
@@ -140,9 +161,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(status, payload)
         except ApiError as e:
             self._error(e.http_status, e.code, str(e))
+        except TimeoutError:
+            self._error(408, "timeout", "request read timed out")
         except Exception as e:                     # never kill the server thread
             log.exception("api handler failed")
-            self._error(500, "internal_error", str(e))
+            self._error(500, "internal_error", "request could not be completed")
 
     def do_GET(self):
         self._dispatch("GET")
@@ -154,7 +177,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._error(405, "method_not_allowed", "CORS is not supported")
 
 
-class _Server(ThreadingHTTPServer):
+class _Server(BoundedConnections, ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 

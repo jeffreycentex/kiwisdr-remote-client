@@ -72,7 +72,7 @@ def run(argv):
                            a.reset_pause_s, not a.no_local_exempt)
     svc = KiwiService(policy=policy, compression=not a.no_compression, record_dir=a.record_dir)
     api = ApiServer(svc, a.api_host, a.api_port, a.api_token)
-    rig = None if a.no_rigctl else RigctldServer(svc.radio, a.rigctl_host, a.rigctl_port)
+    rig = None if a.no_rigctl else RigctldServer(svc.radio, a.rigctl_host, a.rigctl_port, service=svc)
     done = threading.Event()
 
     def _stop(signum, frame):

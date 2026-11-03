@@ -25,11 +25,14 @@ self._lock, and never take self._lock in the event handler.
 import dataclasses
 import ipaddress
 import logging
+import math
 import os
 import re
+import string
 import threading
 import time
 
+from .commands import CommandQueue, command
 from . import __version__
 from .radio import BUSY, CONNECTED, FAILED, RadioController
 from .state import ServerSpec
@@ -108,11 +111,14 @@ class KiwiService:
         self.record_dir = record_dir or default_record_dir()
         self._clock = clock
         self._lock = threading.RLock()
+        self._commands = CommandQueue()
         self._session = None
         self._rec_deadline = None
         self._rec_max = None
         self.radio = RadioController(on_event=self._on_radio_event, compression=compression)
         self._stop = threading.Event()
+        self._shutdown_lock = threading.Lock()
+        self._closed = False
         self._ticker = None
         if start_ticker:
             self._ticker = threading.Thread(target=self._tick_loop, name="kiwi-service", daemon=True)
@@ -159,7 +165,19 @@ class KiwiService:
     # ------------------------------------------------------------------ connection
     def connect(self, server, password="", user=None, wait=0.0,
                 session_limit_min=None, reset_interval_min=None, compression=None, tls=False):
-        """server: 'host[:port]' text or ServerSpec. Returns status().
+        session = self._connect(server, password, user, 0.0, session_limit_min,
+                                reset_interval_min, compression, tls)
+        # Waiting for network readiness must not block disconnect or timer commands.
+        end = time.monotonic() + max(0.0, float(wait))
+        while (time.monotonic() < end and self._session is session
+               and session.ended is None and self.radio.state not in (CONNECTED, FAILED, BUSY)):
+            time.sleep(0.05)
+        return self.status()
+
+    @command
+    def _connect(self, server, password="", user=None, wait=0.0,
+                session_limit_min=None, reset_interval_min=None, compression=None, tls=False):
+        """server: 'host[:port]' text or ServerSpec. Returns the new session.
         tls applies to text only; an https:// address turns it on by itself."""
         if isinstance(server, ServerSpec):
             spec = server
@@ -169,20 +187,20 @@ class KiwiService:
             except (ValueError, TypeError) as e:
                 raise ApiError("bad_request", "invalid server address: %s" % e)
         for name, v in (("session_limit_min", session_limit_min), ("reset_interval_min", reset_interval_min)):
-            if v is not None and (not isinstance(v, (int, float)) or v < 0):
+            if v is not None and (not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0):
                 raise ApiError("bad_request", "%s must be a number >= 0" % name)
+        self.radio.disconnect()
+        if self.radio.running:
+            raise ApiError("conflict", "previous connection is still stopping; retry shortly", 409)
         with self._lock:
             self._session = _Session(spec, session_limit_min, reset_interval_min)
         if compression is not None:
             self.radio._compression = bool(compression)
         self.radio.connect(spec)
         self._emit("session", self.session_info())
-        if wait and wait > 0:
-            end = time.monotonic() + float(wait)
-            while time.monotonic() < end and self.radio.state not in (CONNECTED, FAILED, BUSY):
-                time.sleep(0.05)
-        return self.status()
+        return self._session
 
+    @command
     def disconnect(self, reason="requested"):
         """Stops the recording too: a disconnected recording would only collect gaps."""
         rec = self.stop_recording(reason="disconnect")
@@ -197,13 +215,21 @@ class KiwiService:
         return st
 
     # ------------------------------------------------------------------ tuning
+    @command
     def tune(self, freq_hz=None, mode=None, passband=None, source="api"):
         try:
+            if mode is not None or passband is not None:
+                self.radio.tune.with_mode(mode or self.radio.tune.mode, passband)
+            if freq_hz is not None:
+                hz = int(round(float(freq_hz)))
+                lo, hi = self.radio.freq_limits
+                if not lo <= hz <= hi:
+                    raise ValueError("frequency outside receiver range")
             if mode is not None or passband is not None:
                 self.radio.set_mode(mode or self.radio.tune.mode, passband, source=source)
             if freq_hz is not None:
                 self.radio.set_frequency(freq_hz, source=source)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, OverflowError) as e:
             raise ApiError("bad_request", str(e))
         return self.tune_info()
 
@@ -234,6 +260,12 @@ class KiwiService:
             }
             template = name or "kiwi_{date}T{time}_{freq_khz}kHz_{mode}"
             try:
+                parts = list(string.Formatter().parse(template))
+                if len(template) > 200 or any(
+                    field is not None and (field not in fields or spec or conversion)
+                    for _, field, spec, conversion in parts
+                ):
+                    raise ValueError("use simple recording fields without format specifications")
                 base = template.format(**fields)
             except (KeyError, IndexError, ValueError) as e:
                 raise ApiError("bad_request", "bad name template (fields: %s): %s"
@@ -247,17 +279,19 @@ class KiwiService:
             n += 1
         return path
 
+    @command
     def start_recording(self, path=None, directory=None, name=None, max_seconds=None,
                         formats=(".wav",)):
         """The API allows WAV only; the GUI passes formats to also allow .m4a/.mp4."""
-        if max_seconds is not None and (not isinstance(max_seconds, (int, float)) or max_seconds <= 0):
+        if max_seconds is not None and (not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or max_seconds <= 0):
             raise ApiError("bad_request", "max_seconds must be a number > 0")
         if self.radio.recording_path() is not None:
             raise ApiError("conflict", "already recording to %s" % self.radio.recording_path(), 409)
         path = self.recording_path_for(path, directory, name, formats)
         try:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-            self.radio.start_recording(path)
+            if not self.radio.start_recording(path):
+                raise RuntimeError("recording output could not be opened")
         except (OSError, RuntimeError, ValueError) as e:
             raise ApiError("io_error", "cannot record to %s: %s" % (path, e), 500)
         with self._lock:
@@ -265,6 +299,7 @@ class KiwiService:
             self._rec_deadline = self._clock() + self._rec_max if self._rec_max else None
         return self.recording_info()
 
+    @command
     def stop_recording(self, reason="requested"):
         with self._lock:
             self._rec_deadline = self._rec_max = None
@@ -329,6 +364,7 @@ class KiwiService:
             except Exception:
                 log.exception("service tick failed")
 
+    @command
     def tick(self):
         """Enforce recording max length, session limit and periodic reset."""
         now = self._clock()
@@ -378,11 +414,23 @@ class KiwiService:
 
     # ------------------------------------------------------------------ lifecycle
     def shutdown(self):
-        self._stop.set()
-        self.stop_recording(reason="shutdown")
-        self.radio.shutdown()
-        if self._ticker is not None:
-            self._ticker.join(2.0)
+        with self._shutdown_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._stop.set()
+            if self._ticker is not None:
+                self._ticker.join()
+            try:
+                self._commands.call(self._shutdown)
+            finally:
+                self._commands.close()
+
+    def _shutdown(self):
+        try:
+            self.stop_recording(reason="shutdown")
+        finally:
+            self.radio.shutdown()
 
 
 def default_record_dir():
