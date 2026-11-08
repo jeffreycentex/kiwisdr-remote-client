@@ -136,8 +136,10 @@ The pinned kiwiclient sources are included; downloading them again is unnecessar
 Use `python fetch_kiwiclient.py` only when intentionally refreshing that copy.
 PyInstaller builds for the current OS; it does not cross-compile.
 
-Outputs include a windowed **KiwiSDR Remote** and console **kiwiremote-cli** in
-`dist/`. On macOS, the GUI is `dist/KiwiSDR Remote.app`. Local macOS builds are
+Windows and Linux builds put two self-contained executables in `dist/` and in
+the release archives. **KiwiSDR Remote** opens the GUI, and **kiwiremote-cli**
+runs headless mode and API commands. On Windows both filenames end in `.exe`.
+On macOS, the GUI is `dist/KiwiSDR Remote.app`. Local macOS builds are
 ad-hoc signed and not notarized. GitHub Actions can build Windows x64, macOS Apple
 silicon and Linux x64 archives through the **Build** workflow. Publishing a `v*`
 tag triggers a release; normal pushes do not create releases.

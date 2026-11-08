@@ -67,8 +67,11 @@ jobs:
 
       - name: Smoke test the frozen CLI
         run: |
-          exe="dist/KiwiSDR Remote/kiwiremote-cli"
-          [ "$RUNNER_OS" = "Windows" ] && exe="$exe.exe"
+          case "$RUNNER_OS" in
+            Windows) exe="dist/kiwiremote-cli.exe" ;;
+            macOS)   exe="dist/KiwiSDR Remote/kiwiremote-cli" ;;
+            Linux)   exe="dist/kiwiremote-cli" ;;
+          esac
           "$exe" --headless --help
           "$exe" ctl --help
 
@@ -80,9 +83,9 @@ jobs:
           name="KiwiSDR-Remote-${ver}-${{ matrix.target }}"
           cd dist
           case "$RUNNER_OS" in
-            Windows) 7z a -tzip "../$name.zip" "KiwiSDR Remote" >/dev/null; file="$name.zip" ;;
+            Windows) 7z a -tzip "../$name.zip" "KiwiSDR Remote.exe" kiwiremote-cli.exe >/dev/null; file="$name.zip" ;;
             macOS)   ditto -c -k --keepParent "KiwiSDR Remote.app" "../$name.zip"; file="$name.zip" ;;
-            Linux)   tar czf "../$name.tar.gz" "KiwiSDR Remote"; file="$name.tar.gz" ;;
+            Linux)   tar czf "../$name.tar.gz" "KiwiSDR Remote" kiwiremote-cli; file="$name.tar.gz" ;;
           esac
           echo "file=$file" >> "$GITHUB_OUTPUT"
 

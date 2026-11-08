@@ -1,6 +1,6 @@
 # PyInstaller spec:  pyinstaller kiwiremote.spec
-# Produces dist/KiwiSDR Remote/ (Windows, Linux) or dist/KiwiSDR Remote.app (macOS) with two
-# executables sharing one set of libraries:
+# Produces two self-contained executables in dist/ on Windows and Linux,
+# or a shared bundle at dist/KiwiSDR Remote.app on macOS:
 #   "KiwiSDR Remote"   windowed GUI
 #   "kiwiremote-cli"   console program for --headless and 'ctl' (on Windows the GUI exe has no console)
 import os
@@ -26,11 +26,16 @@ for optional in ("samplerate", "av"):
 a = Analysis(["run_kiwiremote.py"], pathex=[".", KC], hiddenimports=hidden,
              excludes=["tkinter"], noarchive=False)
 pyz = PYZ(a.pure)
-gui = EXE(pyz, a.scripts, [], exclude_binaries=True, name="KiwiSDR Remote",
-          console=False, upx=False)
-cli = EXE(pyz, a.scripts, [], exclude_binaries=True, name="kiwiremote-cli",
-          console=True, upx=False)
-coll = COLLECT(gui, cli, a.binaries, a.datas, name="KiwiSDR Remote", upx=False)
 if sys.platform == "darwin":
+    gui = EXE(pyz, a.scripts, [], exclude_binaries=True, name="KiwiSDR Remote",
+              console=False, upx=False)
+    cli = EXE(pyz, a.scripts, [], exclude_binaries=True, name="kiwiremote-cli",
+              console=True, upx=False)
+    coll = COLLECT(gui, cli, a.binaries, a.datas, name="KiwiSDR Remote", upx=False)
     app = BUNDLE(coll, name="KiwiSDR Remote.app", bundle_identifier="net.kiwiremote.app",
                  info_plist={"NSHighResolutionCapable": True})
+else:
+    gui = EXE(pyz, a.scripts, a.binaries, a.datas, name="KiwiSDR Remote",
+              console=False, upx=False)
+    cli = EXE(pyz, a.scripts, a.binaries, a.datas, name="kiwiremote-cli",
+              console=True, upx=False)
