@@ -49,7 +49,7 @@ Returns API information: `api_version`, `app_version`, and the list of endpoints
 ```json
 {
   "ok": true,
-  "app_version": "1.0",
+  "app_version": "1.01",
   "state": "connected",
   "connected": true,
   "server": "kiwi.example.net:8073",

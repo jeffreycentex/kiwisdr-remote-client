@@ -26,6 +26,7 @@ for optional in ("samplerate", "av"):
 a = Analysis(["run_kiwiremote.py"], pathex=[".", KC], hiddenimports=hidden,
              excludes=["tkinter"], noarchive=False)
 pyz = PYZ(a.pure)
+assets = os.path.join(SPECPATH, "assets")
 if sys.platform == "darwin":
     gui = EXE(pyz, a.scripts, [], exclude_binaries=True, name="KiwiSDR Remote",
               console=False, upx=False)
@@ -33,9 +34,11 @@ if sys.platform == "darwin":
               console=True, upx=False)
     coll = COLLECT(gui, cli, a.binaries, a.datas, name="KiwiSDR Remote", upx=False)
     app = BUNDLE(coll, name="KiwiSDR Remote.app", bundle_identifier="net.kiwiremote.app",
+                 icon=os.path.join(assets, "kiwiremote.icns"),
                  info_plist={"NSHighResolutionCapable": True})
 else:
+    icon = os.path.join(assets, "kiwiremote.ico") if sys.platform == "win32" else None
     gui = EXE(pyz, a.scripts, a.binaries, a.datas, name="KiwiSDR Remote",
-              console=False, upx=False)
+              console=False, upx=False, icon=icon)
     cli = EXE(pyz, a.scripts, a.binaries, a.datas, name="kiwiremote-cli",
               console=True, upx=False)
