@@ -4,6 +4,7 @@
 #   "KiwiSDR Remote"   windowed GUI
 #   "kiwiremote-cli"   console program for --headless and 'ctl' (on Windows the GUI exe has no console)
 import os
+import runpy
 import sys
 
 from PyInstaller.utils.hooks import collect_submodules
@@ -33,10 +34,13 @@ if sys.platform == "darwin":
     cli = EXE(pyz, a.scripts, [], exclude_binaries=True, name="kiwiremote-cli",
               console=True, upx=False)
     coll = COLLECT(gui, cli, a.binaries, a.datas, name="KiwiSDR Remote", upx=False)
+    version = runpy.run_path(os.path.join(SPECPATH, "kiwiremote", "__init__.py"))["__version__"]
     # The shared collection can inherit the console launcher's background flag.
     app = BUNDLE(coll, name="KiwiSDR Remote.app", bundle_identifier="net.kiwiremote.app",
+                 version=version,
                  icon=os.path.join(assets, "kiwiremote.icns"),
-                 info_plist={"LSBackgroundOnly": False, "NSHighResolutionCapable": True})
+                 info_plist={"CFBundleVersion": version, "LSBackgroundOnly": False,
+                             "NSHighResolutionCapable": True})
 else:
     icon = os.path.join(assets, "kiwiremote.ico") if sys.platform == "win32" else None
     gui = EXE(pyz, a.scripts, a.binaries, a.datas, name="KiwiSDR Remote",

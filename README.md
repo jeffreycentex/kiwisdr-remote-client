@@ -11,8 +11,6 @@ control, recording and security improvements developed from that codebase.
 
 See the [changelog](CHANGELOG.md) for release details.
 
-![Compact light-mode interface](docs/images/main-window.png)
-
 ## What it does
 
 - **Tune:** USB, LSB, AM, AMN, AMW and FMN, with adjustable bandwidth and receiver-specific frequency limits.
@@ -104,6 +102,24 @@ Keyboard shortcuts use Ctrl on Windows/Linux and Command on macOS:
 | Ctrl/Command+F | Focus frequency |
 | Ctrl/Command+R | Start or stop recording |
 | Ctrl/Command+Return | Connect or disconnect |
+
+## Desktop screenshots
+
+### Listen
+
+![Listen tab showing receiver connection, tuning modes, and Quick Tune presets](docs/images/main-window.png)
+
+### Audio
+
+![Audio tab showing output device, gain, and Record to file](docs/images/audio-tab.png)
+
+### DSP
+
+![DSP tab showing Noise Blanker, Audio Bandpass, Manual Notch, Auto Notch, and Noise Reduction](docs/images/dsp-tab.png)
+
+### Automation
+
+![Automation tab showing Hamlib rigctld, the API, and session limits](docs/images/automation-tab.png)
 
 ## Hamlib, API and headless mode
 
