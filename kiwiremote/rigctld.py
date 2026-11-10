@@ -44,8 +44,8 @@ LONG = {
 }
 SHORT = {v: k for k, v in LONG.items()}
 
-# hamlib mode bit flags (rig.h): AM=0x1 CW=0x2 USB=0x4 LSB=0x8
-MODE_BITS = "0xd"
+# Hamlib mode bits: AM, USB, LSB, FMN (21), AMN (29).
+MODE_BITS = hex(0xd | (1 << 21) | (1 << 29))
 
 # hamlib VFO names (rig_strvfo). Clients in VFO mode (fldigi, hamlib >= 4)
 # put one in front of the arguments of most commands: 'f VFOA', 'l VFOA STRENGTH'.
@@ -71,7 +71,8 @@ def _dump_state(max_hz):
     for step in (1, 10, 100, 1000, 5000, 9000, 10000):
         lines.append("%s %d" % (MODE_BITS, step))
     lines.append("0 0")
-    lines += ["0xc 2800", "0xc 2400", "0x1 9800", "0x1 6000", "0 0"]   # filters
+    lines += ["0xc 2800", "0xc 2400", "0x1 9800", "0x1 6000",
+              "0x20000000 5000", "0x200000 6000", "0 0"]   # filters
     lines += ["0", "0", "0", "0"]   # max_rit max_xit max_ifshift announces
     lines += ["", ""]               # preamp, attenuator lists
     lines += ["0x0"] * 6            # get/set func, level, parm
@@ -246,7 +247,9 @@ class RigctldServer:
             return [], 0
         if cmd == "get_mode":
             st = c.tune
-            return [("Mode", st.mode), ("Passband", "%d" % st.passband)], 0
+            # Hamlib has no AMW mode. Report it as AM with the current bandwidth.
+            mode = "AM" if st.mode == "AMW" else st.mode
+            return [("Mode", mode), ("Passband", "%d" % st.passband)], 0
         if cmd == "set_mode":
             mode = args[0]
             pb = int(float(args[1])) if len(args) > 1 else 0

@@ -9,16 +9,18 @@ and uses a pinned copy of [jks-prv/kiwiclient](https://github.com/jks-prv/kiwicl
 for the receiver protocol. This repository contains the compact interface and the
 control, recording and security improvements developed from that codebase.
 
+See the [changelog](CHANGELOG.md) for release details.
+
 ![Compact light-mode interface](docs/images/main-window.png)
 
 ## What it does
 
-- **Tune:** USB, LSB and AM, with adjustable bandwidth and receiver-specific frequency limits.
+- **Tune:** USB, LSB, AM, AMN, AMW and FMN, with adjustable bandwidth and receiver-specific frequency limits.
 - **Listen:** output to speakers or a virtual audio cable, with drift correction and resampling.
 - **Record:** native-rate mono WAV, or AAC in M4A/MP4 when PyAV is installed.
 - **Control:** hamlib NET rigctl on `127.0.0.1:4532`, plus an HTTP/JSON API on `127.0.0.1:7373`.
 - **Run headless:** connect, tune and record without loading Qt.
-- **Use a compact desktop:** a 680 × 600 light-mode window with Listen & record, Audio and Automation tabs. Smaller windows scroll; window geometry is saved.
+- **Use a compact desktop:** a 680 × 600 light-mode window with Listen, Audio, DSP, Automation and Log tabs. Smaller windows scroll, and window geometry is saved.
 
 The GUI, API and hamlib tuning share one service command queue. Recording has a
 separate bounded writer, exclusive file creation, and WAV rotation at 1 GiB.
@@ -42,7 +44,8 @@ python run_kiwiremote.py
 Linux also needs PortAudio (`sudo apt install libportaudio2` on Debian/Ubuntu)
 and the usual Qt runtime libraries. `samplerate` provides higher-quality
 resampling and is skipped on Windows; linear interpolation is the fallback.
-PyAV supplies M4A/MP4 recording. WAV works without it. `certifi` supplements the
+PyAV supplies M4A/MP4 recording. WAV works without it. SciPy supplies the local
+Audio Bandpass and Manual Notch filters. `certifi` supplements the
 system TLS trust store.
 
 The Python package and launchers retain their original names (`kiwiremote`,
@@ -52,10 +55,46 @@ still named **KiwiSDR Remote**.
 ## Desktop quick start
 
 1. Enter `host:port`, or `https://host[:port]` for a TLS receiver. Supply a receiver password only if needed, then choose **Connect**.
-2. Set frequency in kHz, mode and bandwidth on **Listen & record**.
+2. Set frequency in kHz, mode and bandwidth on **Listen**.
 3. Choose an output device on **Audio**. For decoding software, select a virtual cable rather than speakers. See [virtual audio setup](docs/VIRTUAL_AUDIO.md).
-4. Select a recording format and folder, then choose **Record**. **Open** reveals the output folder.
+4. In **Audio → Record to file**, select a format and folder, then choose **Record**. **Open** reveals the output folder.
 5. Use **Automation** to configure rigctld, the API and session limits.
+6. Use **DSP** to enable the KiwiSDR noise blanker and set its gate time and threshold.
+7. Use **Log → Export log…** to save the latest 2,000 lines of the session log as plain text.
+
+### Audio filters
+
+**DSP → Audio Bandpass** uses SciPy to filter playback and recordings.
+The cutoff frequencies are center minus and plus half the width. The default
+center of 1,500 Hz and width of 2,400 Hz give cutoffs of 300 and 2,700 Hz.
+The filter starts off and bypasses settings that put either cutoff outside the
+receiver audio's usable range. The cutoff frequencies must be above zero and
+below half the incoming sample rate.
+
+**Manual Notch** removes a narrow tone at the chosen audio frequency and width.
+It starts off, with a frequency of 1,000 Hz and a width of 50 Hz.
+**Auto Notch** and **Noise Reduction** use the KiwiSDR's WDSP filters. Both start
+off by default. Leave them off when sending audio to a digital decoder.
+
+### Quick Tune presets
+
+**File → Edit quick-tune presets…** opens `quicktune.txt` in the app's
+configuration folder. On macOS, the path is
+`~/Library/Preferences/KiwiSDR Remote/quicktune.txt`. Add one
+`name, frequency in kHz` entry per line.
+
+```text
+# Name, frequency in kHz
+40m FT8, 7074
+WWV, 10000
+```
+
+The app shows up to 15 buttons on **Listen**, with labels limited to 10
+characters. A button changes only the frequency. Lines beginning with `#`
+are ignored. Save the file to update the buttons while the app is running,
+or delete it to hide them.
+
+### Keyboard shortcuts
 
 Keyboard shortcuts use Ctrl on Windows/Linux and Command on macOS:
 

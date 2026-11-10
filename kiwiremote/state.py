@@ -12,6 +12,9 @@ MODES = {
     "USB": "usb",
     "LSB": "lsb",
     "AM": "am",
+    "AMN": "amn",
+    "AMW": "amw",
+    "FMN": "nnfm",
 }
 
 # rigctl clients sometimes ask for modes we don't have; map them to the nearest.
@@ -30,7 +33,12 @@ DEFAULT_PASSBAND = {
     "USB": 2800,
     "LSB": 2800,
     "AM": 9800,
+    "AMN": 5000,
+    "AMW": 12000,
+    "FMN": 6000,
 }
+
+DEFAULT_NOISE_BLANKER = (False, 100, 50)
 
 # Low edge of the SSB passband (Hz from carrier). 200 Hz keeps low FT8/JS8
 # tones while rejecting most hum/carrier leakage.
@@ -44,7 +52,7 @@ DEFAULT_MAX_FREQ_HZ = 32_000_000  # refined per server once connected
 
 
 def normalize_mode(name):
-    """Return a canonical UI mode name (USB/LSB/AM) or None if unsupported."""
+    """Return a canonical UI mode name or None if unsupported."""
     if name is None:
         return None
     m = name.strip().upper()
@@ -66,10 +74,8 @@ def passband_edges(mode, width):
         return SSB_LOW_EDGE, SSB_LOW_EDGE + width
     if mode == "LSB":
         return -(SSB_LOW_EDGE + width), -SSB_LOW_EDGE
-    if mode == "AM":
-        half = width // 2
-        return -half, half
-    raise ValueError("unsupported mode %r" % mode)
+    half = width // 2
+    return -half, half
 
 
 @dataclass(frozen=True)

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Real Qt integration, skipped by the minimal headless CI environment."""
 import importlib.util
+import logging
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -25,18 +27,68 @@ class TestGui(unittest.TestCase):
             settings = QSettings(os.path.join(directory, 'test.ini'), QSettings.IniFormat)
             settings.setValue('rig_enable', False)
             settings.setValue('rec_dir', directory)
-            with patch.object(gui, 'QSettings', return_value=settings), patch.object(gui, 'list_output_devices', return_value=[]):
+            with (patch.object(gui, 'QSettings', return_value=settings),
+                  patch.object(gui.QStandardPaths, 'writableLocation', return_value=directory),
+                  patch.object(gui, 'list_output_devices', return_value=[])):
                 window = gui.MainWindow()
             kiwi = FakeKiwi()
             try:
                 window.show()
                 app.processEvents()
-                self.assertEqual(window.tabs.count(), 3)
+                self.assertEqual([window.tabs.tabText(i) for i in range(window.tabs.count())],
+                                 ["Listen", "Audio", "DSP", "Automation", "Log"])
                 self.assertLessEqual(window.width(), 680)
                 self.assertLessEqual(window.height(), 600)
                 self.assertGreater(app.palette().color(QPalette.Window).lightness(), 230)
-                viewport = window.tabs.widget(0).viewport()
+                window.tabs.setCurrentIndex(1)
+                app.processEvents()
+                viewport = window.tabs.widget(1).viewport()
+                self.assertTrue(viewport.isAncestorOf(window.rec_btn))
                 self.assertLess(window.rec_btn.mapTo(viewport, window.rec_btn.rect().bottomRight()).y(), viewport.height())
+                window.tabs.setCurrentIndex(0)
+                self.assertTrue(window.quick_tune_box.isHidden())
+                presets = Path(directory) / "quicktune.txt"
+                presets.write_text("# Presets\nInvalid, inf\nA long preset name, 7101.125\n"
+                                   + "Other, 7074\n" * 16, encoding="utf-8")
+                window._tick()
+                self.assertEqual(sum(not b.isHidden() for b in window.quick_tune_buttons), 15)
+                self.assertEqual(window.quick_tune_buttons[0].text(), "A long pre")
+                window.mode_buttons["AMN"].click()
+                window.quick_tune_buttons[0].click()
+                self.assertEqual(window.radio.tune.freq_hz, 7_101_125)
+                self.assertEqual(window.radio.tune.mode, "AMN")
+                presets.write_text("New, 7200\n", encoding="utf-8")
+                window._tick()
+                self.assertEqual(window.quick_tune_buttons[0].text(), "New")
+                self.assertTrue(window.quick_tune_buttons[1].isHidden())
+                presets.unlink()
+                window._tick()
+                self.assertTrue(window.quick_tune_box.isHidden())
+
+                window.nb_gate.setValue(300)
+                window.nb_threshold.setValue(40)
+                window.nb_enabled.setChecked(True)
+                self.assertEqual(window.radio.noise_blanker, (True, 300, 40))
+                window.nb_enabled.setChecked(False)
+                if gui.HAVE_SCIPY:
+                    window.bandpass_center.setValue(1200)
+                    window.bandpass_width.setValue(800)
+                    window.bandpass_enabled.setChecked(True)
+                    self.assertEqual(window.radio.audio_filters[0], (True, 1200, 800))
+                    window.bandpass_enabled.setChecked(False)
+                    window.notch_frequency.setValue(750)
+                    window.notch_enabled.setChecked(True)
+                    self.assertEqual(window.radio.audio_filters[1], (True, 750, 50))
+                    window.notch_enabled.setChecked(False)
+                window.auto_notch.setChecked(True)
+                self.assertEqual(window.radio.noise_filters, (False, True))
+                window.noise_reduction.setChecked(True)
+                self.assertEqual(window.radio.noise_filters, (True, True))
+                logging.getLogger("kiwiremote.test").warning("Test log export")
+                exported = Path(directory) / "export.log"
+                with patch.object(gui.QFileDialog, "getSaveFileName", return_value=(str(exported), "")):
+                    window._export_log()
+                self.assertIn("Test log export", exported.read_text(encoding="utf-8"))
                 window.service.connect('127.0.0.1:%d' % kiwi.port, wait=5)
                 window.service.tune(freq_hz=7100000, mode='LSB')
                 app.processEvents()

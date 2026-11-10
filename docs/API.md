@@ -49,7 +49,7 @@ Returns API information: `api_version`, `app_version`, and the list of endpoints
 ```json
 {
   "ok": true,
-  "app_version": "1.01",
+  "app_version": "1.1",
   "state": "connected",
   "connected": true,
   "server": "kiwi.example.net:8073",
@@ -109,7 +109,7 @@ If a connection already exists, it is replaced. A running recording continues ac
 Disconnects and ends the session. **A running recording is closed as well.** The response includes `recording_stopped`, which holds the closed recording's info, or `null` if nothing was recording.
 
 ### `POST /api/v1/tune`
-Any combination of `freq_hz` or `freq_khz` (number), `mode` (`USB` / `LSB` / `AM`; the aliases `PKTUSB`, `PKTLSB` and `SAM` are also accepted) and `passband` (Hz; `0` = the mode's default). Tuning works with or without a connection; the setting is applied on connect. Returns `{"tune": {...}}`.
+Any combination of `freq_hz` or `freq_khz` (number), `mode` (`USB`, `LSB`, `AM`, `AMN`, `AMW`, or `FMN`) and `passband` in Hz. Omit `passband` or use `0` to select the default when changing modes. The aliases `PKTUSB`, `PKTLSB` and `SAM` are also accepted. Tuning works with or without a connection. The setting is applied on connect. Returns `{"tune": {...}}`.
 
 ### `POST /api/v1/record/start`
 | Field | Type | |

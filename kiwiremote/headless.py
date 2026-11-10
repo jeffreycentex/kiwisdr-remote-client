@@ -15,6 +15,7 @@ import threading
 from .api import DEFAULT_PORT, ApiServer
 from .rigctld import RigctldServer
 from .service import KiwiService, SessionPolicy, default_record_dir
+from .state import MODES
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def build_parser():
     g.add_argument("--password", default=os.environ.get("KIWIREMOTE_KIWI_PASSWORD", ""))
     g.add_argument("--user", default="kiwiremote")
     g.add_argument("--freq-khz", type=float)
-    g.add_argument("--mode", choices=["USB", "LSB", "AM"])
+    g.add_argument("--mode", type=str.upper, choices=MODES)
     g = ap.add_argument_group("session policy (minutes, 0 = off)")
     d = SessionPolicy()
     g.add_argument("--limit-password-min", type=float, default=d.limit_with_password_min)

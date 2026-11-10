@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 
 from .api import DEFAULT_PORT, PREFIX
+from .state import MODES
 
 
 class ApiClient:
@@ -95,7 +96,7 @@ def main(argv=None):
     g = t.add_mutually_exclusive_group()
     g.add_argument("--hz", type=float)
     g.add_argument("--khz", type=float)
-    t.add_argument("--mode", choices=["USB", "LSB", "AM", "usb", "lsb", "am"])
+    t.add_argument("--mode", type=str.upper, choices=MODES)
     t.add_argument("--passband", type=int)
     r = sub.add_parser("record-start")
     r.add_argument("--path")

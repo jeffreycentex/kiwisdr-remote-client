@@ -33,9 +33,10 @@ if sys.platform == "darwin":
     cli = EXE(pyz, a.scripts, [], exclude_binaries=True, name="kiwiremote-cli",
               console=True, upx=False)
     coll = COLLECT(gui, cli, a.binaries, a.datas, name="KiwiSDR Remote", upx=False)
+    # The shared collection can inherit the console launcher's background flag.
     app = BUNDLE(coll, name="KiwiSDR Remote.app", bundle_identifier="net.kiwiremote.app",
                  icon=os.path.join(assets, "kiwiremote.icns"),
-                 info_plist={"NSHighResolutionCapable": True})
+                 info_plist={"LSBackgroundOnly": False, "NSHighResolutionCapable": True})
 else:
     icon = os.path.join(assets, "kiwiremote.ico") if sys.platform == "win32" else None
     gui = EXE(pyz, a.scripts, a.binaries, a.datas, name="KiwiSDR Remote",

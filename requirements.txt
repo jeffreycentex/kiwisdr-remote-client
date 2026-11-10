@@ -4,6 +4,7 @@ numpy>=1.24
 sounddevice>=0.4.6        # PortAudio wheels included on Windows/macOS; Linux needs libportaudio2
 
 # Recommended
+scipy>=1.10               # Audio bandpass filter
 # libsamplerate: high-quality resampling. Skipped on Windows, where pip may try to
 # build it from source; the app then uses linear interpolation.
 samplerate>=0.2.1; sys_platform != "win32"

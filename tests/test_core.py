@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fake_kiwi import TLS_CERT, FakeKiwi, TlsFront  # noqa: E402
+from kiwiremote.dsp import AudioFilter, HAVE_SCIPY  # noqa: E402
 from kiwiremote import radio  # noqa: E402
 from kiwiremote import resample  # noqa: E402
 from kiwiremote.radio import RadioController  # noqa: E402
@@ -55,6 +56,44 @@ class TestState(unittest.TestCase):
         self.assertEqual(passband_edges("USB", 2800), (200, 3000))
         self.assertEqual(passband_edges("LSB", 2800), (-3000, -200))
         self.assertEqual(passband_edges("AM", 0), (-4900, 4900))
+        self.assertEqual(passband_edges("AMN", 0), (-2500, 2500))
+        self.assertEqual(passband_edges("AMW", 0), (-6000, 6000))
+        self.assertEqual(passband_edges("FMN", 0), (-3000, 3000))
+
+
+@unittest.skipUnless(HAVE_SCIPY, "SciPy not installed")
+class TestAudioFilters(unittest.TestCase):
+    def test_streaming_response_and_bypass(self):
+        rate = 12000
+        settings = (True, 1000, 400)
+        t = np.arange(rate) / rate
+        tones = np.sin(2 * np.pi * np.array([100, 1000, 4000])[:, None] * t)
+        samples = np.rint(5000 * tones.sum(axis=0)).astype(np.int16)
+        whole = AudioFilter().process(samples, rate, settings)
+        streaming = AudioFilter()
+        chunks = [streaming.process(block, rate, settings) for block in np.array_split(samples, 23)]
+        np.testing.assert_array_equal(whole, np.concatenate(chunks))
+        spectrum = abs(np.fft.rfft(whole[rate // 2:])) / (rate / 4)
+        self.assertGreater(spectrum[500], 4500)
+        self.assertLess(spectrum[50], 50)
+        self.assertLess(spectrum[2000], 50)
+        with self.assertRaisesRegex(ValueError, "bypassed"):
+            streaming.process(samples, 2400, settings)
+        self.assertIs(streaming.process(samples, 2400, settings), samples)
+        np.testing.assert_array_equal(streaming.process(samples, rate, settings), whole)
+        self.assertIs(streaming.process(samples, rate, (False, 1000, 400)), samples)
+
+    def test_manual_notch(self):
+        rate = 12000
+        t = np.arange(rate) / rate
+        tones = np.sin(2 * np.pi * np.array([700, 1000])[:, None] * t)
+        samples = np.rint(5000 * tones.sum(axis=0)).astype(np.int16)
+        notch = AudioFilter(notch=True)
+        output = np.concatenate([notch.process(block, rate, (True, 1000, 50))
+                                 for block in np.array_split(samples, 23)])
+        spectrum = abs(np.fft.rfft(output[rate // 2:])) / (rate / 4)
+        self.assertGreater(spectrum[350], 4500)
+        self.assertLess(spectrum[500], 50)
 
 
 class TestResampler(unittest.TestCase):
@@ -276,6 +315,22 @@ class TestEndToEnd(unittest.TestCase):
                             kiwi.mods())
             self.assertTrue(any(k == "tune" and p[1] == "rigctl" for k, p in events))
 
+            ctl.set_mode("FMN")
+            ctl.set_noise_blanker(True, 200, 40)
+            ctl.set_noise_filters(True, True)
+            self.assertTrue(wait_for(lambda: "SET mod=nnfm low_cut=-3000 high_cut=3000 freq=14074.000"
+                                     in kiwi.mods()))
+            self.assertTrue(wait_for(lambda: "SET nb type=0 en=1" in kiwi.commands))
+            self.assertIn("SET nb type=0 param=0 pval=200", kiwi.commands)
+            self.assertIn("SET nb type=0 param=1 pval=40", kiwi.commands)
+            self.assertTrue(wait_for(lambda: "SET nr type=1 en=1" in kiwi.commands))
+            self.assertIn("SET nr algo=1", kiwi.commands)
+            self.assertIn("SET nr type=0 en=1", kiwi.commands)
+            self.assertIn("SET nr type=1 param=3 pval=0.125", kiwi.commands)
+            ctl.set_noise_filters(False, True)
+            self.assertTrue(wait_for(lambda: "SET nr type=0 en=0" in kiwi.commands))
+            self.assertNotIn("SET nr type=1 en=0", kiwi.commands)
+
             time.sleep(1.5)
             self.assertAlmostEqual(ctl.rssi, -80.0, delta=0.2)
 
@@ -283,6 +338,11 @@ class TestEndToEnd(unittest.TestCase):
             kiwi.drop_clients()
             self.assertTrue(wait_for(lambda: kiwi.connections >= 2, 10), "no reconnect")
             self.assertTrue(wait_for(lambda: ctl.connected, 5))
+            self.assertTrue(wait_for(lambda: kiwi.commands.count("SET nb type=0 en=1") >= 2))
+            self.assertTrue(wait_for(lambda: kiwi.commands.count("SET nr type=1 en=1") == 2))
+            self.assertEqual(kiwi.commands.count("SET nr type=0 en=1"), 1)
+            ctl.set_noise_blanker(False, 200, 40)
+            self.assertTrue(wait_for(lambda: "SET nb type=0 en=0" in kiwi.commands))
 
             info = ctl.stop_recording()
             self.assertGreater(info["seconds"], 1.0)

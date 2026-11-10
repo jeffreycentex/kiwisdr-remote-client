@@ -237,6 +237,24 @@ class KiwiService:
         st = self.radio.tune
         return {"freq_hz": st.freq_hz, "mode": st.mode, "passband": st.passband}
 
+    @command
+    def set_noise_blanker(self, enabled, gate_us, threshold):
+        if (type(gate_us) is not int or not 100 <= gate_us <= 5000
+                or type(threshold) is not int or not 0 <= threshold <= 100):
+            raise ValueError("noise blanker gate must be 100–5000 µs and threshold 0–100%")
+        self.radio.set_noise_blanker(enabled, gate_us, threshold)
+
+    @command
+    def set_audio_filter(self, enabled, center_hz, width_hz, *, notch=False):
+        if (type(center_hz) is not int or center_hz <= 0
+                or type(width_hz) is not int or width_hz <= 0):
+            raise ValueError("audio filter frequency and width must be positive integers")
+        self.radio.set_audio_filter(enabled, center_hz, width_hz, notch=notch)
+
+    @command
+    def set_noise_filters(self, denoise, auto_notch):
+        self.radio.set_noise_filters(denoise, auto_notch)
+
     # ------------------------------------------------------------------ recording
     def recording_path_for(self, path=None, directory=None, name=None, formats=(".wav",)):
         if path:

@@ -22,9 +22,10 @@ import types
 from urllib.parse import urlparse
 
 from . import kiwi_import as K
+from .dsp import AudioFilter, DEFAULT_AUDIO_BANDPASS, DEFAULT_AUDIO_NOTCH
 from .sinks import SoundCardSink, make_file_sink
-from .state import (DEFAULT_MAX_FREQ_HZ, MIN_FREQ_HZ, MODES, ServerSpec, TuneState,
-                    normalize_mode, passband_edges)
+from .state import (DEFAULT_MAX_FREQ_HZ, DEFAULT_NOISE_BLANKER, MIN_FREQ_HZ,
+                    MODES, ServerSpec, TuneState, normalize_mode, passband_edges)
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +137,11 @@ class _KiwiAudioStream(K.KiwiSDRStream):
         self._stop_event = stop
         self._start_time = None
         self._camp_wait_event = None
+        self._applied_noise_blanker = None
+        self._audio_filter = AudioFilter()
+        self._audio_notch = AudioFilter(notch=True)
+        self._noise_filters = (False, False)
+        self._wdsp_initialized = False
         self.rx_ready = False
 
     # Replaces kiwiclient's version, whose redirect loop is unbounded, can't be
@@ -200,6 +206,7 @@ class _KiwiAudioStream(K.KiwiSDRStream):
         self.set_name(self._options.user)
         self.apply_tune(self._owner.tune)
         self.set_agc(on=True)
+        self.apply_receiver_dsp()
         if not self._options.compression:
             self._set_snd_comp(False)
         self.rx_ready = True
@@ -219,6 +226,35 @@ class _KiwiAudioStream(K.KiwiSDRStream):
         lc, hc = passband_edges(st.mode, st.passband)
         self.set_mod(MODES[st.mode], lc, hc, st.freq_hz / 1000.0)
 
+    def apply_noise_blanker(self, settings):
+        if settings == self._applied_noise_blanker:
+            return
+        enabled, gate_us, threshold = settings
+        self._options.nb = enabled
+        if enabled:
+            self.set_noise_blanker(gate_us, threshold)
+        elif self._applied_noise_blanker and self._applied_noise_blanker[0]:
+            self._send_message("SET nb type=0 en=0")
+        self._applied_noise_blanker = settings
+
+    def apply_receiver_dsp(self):
+        self.apply_noise_blanker(self._owner.noise_blanker)
+        settings = self._owner.noise_filters
+        if settings == self._noise_filters:
+            return
+        if not self._wdsp_initialized:
+            self._send_message("SET nr algo=1")  # WDSP, shared by both controls
+            self._wdsp_initialized = True
+        for kind, (enabled, previous) in enumerate(zip(settings, self._noise_filters)):
+            if enabled == previous:
+                continue
+            if enabled:
+                # WDSP defaults from the Kiwi web UI: taps, delay, gain, leakage.
+                for param, value in enumerate((64, 16, 0.00008, 0.125)):
+                    self._send_message("SET nr type=%d param=%d pval=%g" % (kind, param, value))
+            self._send_message("SET nr type=%d en=%d" % (kind, enabled))
+        self._noise_filters = settings
+
     def _process_aud(self, body):
         # Decode according to the per-packet flag, not our last request: packets
         # already in flight when 'SET compression=0' is sent are still ADPCM.
@@ -228,6 +264,13 @@ class _KiwiAudioStream(K.KiwiSDRStream):
 
     def _process_audio_samples(self, seq, samples, rssi, fmt):
         if not self._stop_event.is_set():
+            if self.rx_ready:
+                for audio_filter, settings in zip(
+                        (self._audio_filter, self._audio_notch), self._owner.audio_filters):
+                    try:
+                        samples = audio_filter.process(samples, self._sample_rate, settings)
+                    except ValueError as e:
+                        self._owner._status(str(e), "error")
             self._owner._on_audio(samples, rssi)
 
     def _on_sample_rate_change(self):
@@ -239,6 +282,10 @@ class RadioController:
         self._on_event = on_event or (lambda kind, payload: None)
         self._lock = threading.RLock()
         self._tune = TuneState()
+        self._noise_blanker = DEFAULT_NOISE_BLANKER
+        self._audio_bandpass = DEFAULT_AUDIO_BANDPASS
+        self._audio_notch = DEFAULT_AUDIO_NOTCH
+        self._noise_filters = (False, False)
         self._dirty = False
         self._server = None
         self._compression = compression
@@ -281,6 +328,37 @@ class RadioController:
     def tune(self):
         with self._lock:
             return self._tune
+
+    @property
+    def noise_blanker(self):
+        with self._lock:
+            return self._noise_blanker
+
+    def set_noise_blanker(self, enabled, gate_us, threshold):
+        with self._lock:
+            self._noise_blanker = (bool(enabled), gate_us, threshold)
+
+    @property
+    def audio_filters(self):
+        with self._lock:
+            return self._audio_bandpass, self._audio_notch
+
+    def set_audio_filter(self, enabled, center_hz, width_hz, *, notch=False):
+        with self._lock:
+            settings = (bool(enabled), center_hz, width_hz)
+            if notch:
+                self._audio_notch = settings
+            else:
+                self._audio_bandpass = settings
+
+    @property
+    def noise_filters(self):
+        with self._lock:
+            return self._noise_filters
+
+    def set_noise_filters(self, denoise, auto_notch):
+        with self._lock:
+            self._noise_filters = (bool(denoise), bool(auto_notch))
 
     @property
     def connected(self):
@@ -401,6 +479,8 @@ class RadioController:
                             stream.apply_tune(st)
                         except Exception as e:
                             self._status("Tune failed: %s" % e, "error")
+                    if stream.rx_ready:
+                        stream.apply_receiver_dsp()
                     stream.run()
             except K.KiwiTooBusyError:
                 msg = "%s: all channels busy, retrying in %ds" % (server.label(), BUSY_DELAY)

@@ -3,33 +3,46 @@
 the HTTP API or rigctld show up here (via events) exactly like local ones."""
 
 import logging
+import math
 import os
 import shutil
 import sys
 import time
+from collections import deque
+from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence, QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox,
     QScrollArea, QTabWidget, QStatusBar, QVBoxLayout, QWidget)
 
 from . import __version__
 from .api import DEFAULT_PORT as API_DEFAULT_PORT, ApiServer
+from .dsp import DEFAULT_AUDIO_BANDPASS, DEFAULT_AUDIO_NOTCH, HAVE_SCIPY
 from .rigctld import RigctldServer
 from .service import ApiError, KiwiService, SessionPolicy, default_record_dir
 from .sinks import (HAVE_PYAV, HAVE_SOUNDDEVICE, PULSE_PREFIX, create_virtual_cable,
                     default_recording_name, guess_virtual_cable, list_output_devices,
                     sounddevice_error)
-from .state import DEFAULT_PASSBAND, MODES, ServerSpec
+from .state import DEFAULT_NOISE_BLANKER, DEFAULT_PASSBAND, MIN_FREQ_HZ, MODES, ServerSpec
 
 log = logging.getLogger(__name__)
 
 PUBLIC_LIST_URL = "http://rx.kiwisdr.com/"
 STEPS_HZ = [10, 100, 500, 1000, 5000, 9000, 10000, 100000]
 MAX_HISTORY = 15
+MAX_PRESETS = 15
+MAX_PRESET_FILE_BYTES = 16384
+MAX_LOG_LINES = 2000
+PRESET_HEADER = (
+    '# KiwiSDR Remote quick-tune buttons: one per line, "name, frequency in kHz".\n'
+    '# Up to 15 buttons; names up to 10 characters. Lines starting with # are ignored.\n'
+    '# Saved changes show up in the running app. Delete this file to hide the buttons.\n'
+    '# 40m FT8, 7074\n'
+)
 
 
 def s_units(dbm):
@@ -44,6 +57,25 @@ def s_units(dbm):
 class _Bridge(QObject):
     """Carries events from worker/rigctld threads to the GUI thread."""
     event = Signal(str, object)
+
+
+class _LogBuffer(logging.Handler):
+    """Buffer worker logs for the GUI timer without posting one Qt event per record."""
+
+    def __init__(self):
+        super().__init__()
+        self.pending = deque(maxlen=MAX_LOG_LINES)
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s",
+                                            datefmt="%Y-%m-%d %H:%M:%S"))
+
+    def emit(self, record):
+        self.pending.append(self.format(record))
+
+    def drain(self):
+        with self.lock:
+            batch = "\n".join(self.pending)
+            self.pending.clear()
+        return batch
 
 
 def apply_light_theme(app):
@@ -74,6 +106,9 @@ class MainWindow(QMainWindow):
         apply_light_theme(QApplication.instance())
         self.setWindowTitle("KiwiSDR Remote %s" % __version__)
         self.settings = QSettings("KiwiSDR-Remote", "KiwiSDR Remote")
+        self._preset_path = Path(QStandardPaths.writableLocation(
+            QStandardPaths.AppConfigLocation)) / "quicktune.txt"
+        self._preset_file = None
         self.bridge = _Bridge()
         self.bridge.event.connect(self._on_event, Qt.QueuedConnection)
         emit = self.bridge.event.emit
@@ -119,9 +154,10 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
         for title, builders in (
-            ("Listen & record", (self._build_server_box, self._build_tune_box,
-                                 self._build_record_box)),
-            ("Audio", (self._build_audio_box,)),
+            ("Listen", (self._build_server_box, self._build_tune_box, self._build_quick_tune)),
+            ("Audio", (self._build_audio_box, self._build_record_box)),
+            ("DSP", (self._build_dsp_box, self._build_audio_bandpass,
+                     self._build_manual_notch, self._build_receiver_filters)),
             ("Automation", (self._build_rigctl_box, self._build_api_box)),
         ):
             page = QWidget()
@@ -135,6 +171,8 @@ class MainWindow(QMainWindow):
             scroll.setFrameShape(QScrollArea.NoFrame)
             scroll.setWidget(page)
             self.tabs.addTab(scroll, title)
+        self.tabs.addTab(self._build_log_tab(), "Log")
+        self.menuBar().addMenu("&File").addAction("Edit quick-tune presets…", self._edit_quick_tune)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready · Select a receiver to begin")
@@ -151,7 +189,10 @@ class MainWindow(QMainWindow):
             self.addAction(action)
             self._shortcuts.append(action)
 
+        self._log_buffer = _LogBuffer()
+        logging.getLogger().addHandler(self._log_buffer)
         self._load_settings()
+        self._reload_quick_tune()
         self._timer = QTimer(self, interval=500, timeout=self._tick)
         self._timer.start()
 
@@ -267,6 +308,178 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         v.addLayout(row)
         return box
+
+    def _build_quick_tune(self):
+        self.quick_tune_box = QGroupBox("Quick Tune")
+        layout = QGridLayout(self.quick_tune_box)
+        self.quick_tune_buttons = []
+        for index in range(MAX_PRESETS):
+            button = QPushButton()
+            button.clicked.connect(lambda checked=False, b=button: self._freq_edited(b.property("khz")))
+            layout.addWidget(button, index // 5, index % 5)
+            button.hide()
+            self.quick_tune_buttons.append(button)
+        self.quick_tune_box.hide()
+        return self.quick_tune_box
+
+    def _edit_quick_tune(self):
+        try:
+            self._preset_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with self._preset_path.open("x", encoding="utf-8") as presets:
+                    presets.write(PRESET_HEADER)
+            except FileExistsError:
+                pass
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._preset_path))):
+                raise OSError("No editor opened %s" % self._preset_path)
+        except OSError as e:
+            QMessageBox.warning(self, "Quick Tune", str(e))
+
+    def _reload_quick_tune(self):
+        try:
+            with self._preset_path.open("rb") as presets:
+                contents = presets.read(MAX_PRESET_FILE_BYTES + 1)
+        except FileNotFoundError:
+            contents = b""
+        except OSError:
+            return
+        if contents == self._preset_file:
+            return
+        self._preset_file = contents
+        if len(contents) > MAX_PRESET_FILE_BYTES:
+            log.warning("quicktune.txt exceeds %d bytes", MAX_PRESET_FILE_BYTES)
+            return
+
+        entries = []
+        for number, line in enumerate(contents.decode("utf-8-sig", errors="replace").splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            label, separator, freq = line.rpartition(",")
+            label = label.strip()
+            try:
+                khz = float(freq)
+                if not separator or not label or not math.isfinite(khz) or khz < MIN_FREQ_HZ / 1000:
+                    raise ValueError
+            except ValueError:
+                log.warning("quicktune.txt line %d: expected a name and frequency in kHz", number)
+                continue
+            entries.append((label[:10], khz))
+            if len(entries) == MAX_PRESETS:
+                break
+
+        for button, (label, khz) in zip(self.quick_tune_buttons, entries):
+            button.setText(label.replace("&", "&&"))
+            button.setProperty("khz", khz)
+            button.setToolTip("%s · %g kHz" % (label, khz))
+            button.show()
+        for button in self.quick_tune_buttons[len(entries):]:
+            button.hide()
+        self.quick_tune_box.setVisible(bool(entries))
+
+    def _build_dsp_box(self):
+        box = QGroupBox("Noise Blanker")
+        layout = QFormLayout(box)
+        enabled, gate_us, threshold = DEFAULT_NOISE_BLANKER
+        self.nb_enabled = QCheckBox("Enable noise blanker", checked=enabled)
+        self.nb_gate = QSpinBox(minimum=100, maximum=5000, singleStep=100,
+                                value=gate_us, suffix=" µs")
+        self.nb_threshold = QSpinBox(minimum=0, maximum=100, value=threshold, suffix=" %")
+        layout.addRow(self.nb_enabled)
+        layout.addRow(self._dsp_settings_row(("Gate time", self.nb_gate),
+                                             ("Threshold", self.nb_threshold)))
+        return box
+
+    def _dsp_settings_row(self, *fields):
+        row = QHBoxLayout()
+        for name, spin in fields:
+            spin.setKeyboardTracking(False)
+            label = QLabel(name)
+            label.setBuddy(spin)
+            row.addWidget(label)
+            row.addWidget(spin)
+        row.addStretch()
+        return row
+
+    def _apply_noise_blanker(self, *_):
+        self.service.set_noise_blanker(self.nb_enabled.isChecked(), self.nb_gate.value(),
+                                       self.nb_threshold.value())
+
+    def _build_audio_bandpass(self):
+        box, self.bandpass_enabled, self.bandpass_center, self.bandpass_width = (
+            self._build_audio_filter("Audio Bandpass", "Center", DEFAULT_AUDIO_BANDPASS, 50))
+        return box
+
+    def _build_manual_notch(self):
+        box, self.notch_enabled, self.notch_frequency, self.notch_width = (
+            self._build_audio_filter("Manual Notch", "Frequency", DEFAULT_AUDIO_NOTCH, 10))
+        return box
+
+    def _build_audio_filter(self, title, frequency_label, defaults, step):
+        box = QGroupBox(title)
+        layout = QFormLayout(box)
+        enabled, center, width = defaults
+        checkbox = QCheckBox("Enable " + title.lower(), checked=enabled)
+        frequency = QSpinBox(minimum=1, maximum=100000, singleStep=step,
+                             value=center, suffix=" Hz")
+        bandwidth = QSpinBox(minimum=1, maximum=100000, singleStep=step,
+                             value=width, suffix=" Hz")
+        layout.addRow(checkbox)
+        layout.addRow(self._dsp_settings_row((frequency_label, frequency), ("Width", bandwidth)))
+        box.setToolTip("Filters playback and recordings." if HAVE_SCIPY else
+                       "Install SciPy to use this filter.")
+        box.setEnabled(HAVE_SCIPY)
+        return box, checkbox, frequency, bandwidth
+
+    def _build_receiver_filters(self):
+        box = QGroupBox("KiwiSDR Noise Filters")
+        row = QHBoxLayout(box)
+        self.auto_notch = QCheckBox("Auto Notch")
+        self.auto_notch.setToolTip("Suppresses steady or drifting tones. Leave off for digital decoding.")
+        self.noise_reduction = QCheckBox("Noise Reduction")
+        self.noise_reduction.setToolTip("Reduces background noise for voice listening. Leave off for digital decoding.")
+        row.addWidget(self.auto_notch)
+        row.addWidget(self.noise_reduction)
+        row.addStretch()
+        return box
+
+    def _apply_audio_bandpass(self, *_):
+        self.service.set_audio_filter(HAVE_SCIPY and self.bandpass_enabled.isChecked(),
+                                      self.bandpass_center.value(), self.bandpass_width.value())
+
+    def _apply_manual_notch(self, *_):
+        self.service.set_audio_filter(HAVE_SCIPY and self.notch_enabled.isChecked(),
+                                      self.notch_frequency.value(), self.notch_width.value(),
+                                      notch=True)
+
+    def _apply_receiver_filters(self, *_):
+        self.service.set_noise_filters(self.noise_reduction.isChecked(), self.auto_notch.isChecked())
+
+    def _build_log_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.log_view = QPlainTextEdit(readOnly=True, maximumBlockCount=MAX_LOG_LINES)
+        self.log_view.setAccessibleName("Application log")
+        layout.addWidget(self.log_view)
+        export = QPushButton("Export log…")
+        export.clicked.connect(self._export_log)
+        layout.addWidget(export, alignment=Qt.AlignRight)
+        return page
+
+    def _refresh_log(self):
+        batch = self._log_buffer.drain()
+        if batch:
+            self.log_view.appendPlainText(batch)
+
+    def _export_log(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export log", "kiwisdr-remote.log",
+                                              "Log files (*.log);;Text files (*.txt);;All files (*)")
+        if path:
+            self._refresh_log()
+            try:
+                Path(path).write_text(self.log_view.toPlainText() + "\n", encoding="utf-8")
+            except OSError as e:
+                QMessageBox.warning(self, "Export log", str(e))
 
     def _build_audio_box(self):
         box = QGroupBox("Audio output device (virtual cable / speakers)")
@@ -433,6 +646,35 @@ class MainWindow(QMainWindow):
         self.service.tune(mode=mode, passband=pb)
         self.service.tune(freq_hz=s.value("freq_hz", 7_074_000, type=int))
         self._show_tune(self.radio.tune)
+        enabled, gate_us, threshold = DEFAULT_NOISE_BLANKER
+        self.nb_enabled.setChecked(s.value("nb_enabled", enabled, type=bool))
+        self.nb_gate.setValue(s.value("nb_gate_us", gate_us, type=int))
+        self.nb_threshold.setValue(s.value("nb_threshold", threshold, type=int))
+        self._apply_noise_blanker()
+        self.nb_enabled.toggled.connect(self._apply_noise_blanker)
+        self.nb_gate.valueChanged.connect(self._apply_noise_blanker)
+        self.nb_threshold.valueChanged.connect(self._apply_noise_blanker)
+        enabled, center, width = DEFAULT_AUDIO_BANDPASS
+        self.bandpass_enabled.setChecked(s.value("audio_bandpass_enabled", enabled, type=bool))
+        self.bandpass_center.setValue(s.value("audio_bandpass_center", center, type=int))
+        self.bandpass_width.setValue(s.value("audio_bandpass_width", width, type=int))
+        self._apply_audio_bandpass()
+        self.bandpass_enabled.toggled.connect(self._apply_audio_bandpass)
+        self.bandpass_center.valueChanged.connect(self._apply_audio_bandpass)
+        self.bandpass_width.valueChanged.connect(self._apply_audio_bandpass)
+        enabled, frequency, width = DEFAULT_AUDIO_NOTCH
+        self.notch_enabled.setChecked(s.value("audio_notch_enabled", enabled, type=bool))
+        self.notch_frequency.setValue(s.value("audio_notch_frequency", frequency, type=int))
+        self.notch_width.setValue(s.value("audio_notch_width", width, type=int))
+        self._apply_manual_notch()
+        self.notch_enabled.toggled.connect(self._apply_manual_notch)
+        self.notch_frequency.valueChanged.connect(self._apply_manual_notch)
+        self.notch_width.valueChanged.connect(self._apply_manual_notch)
+        self.auto_notch.setChecked(s.value("auto_notch", False, type=bool))
+        self.noise_reduction.setChecked(s.value("noise_reduction", False, type=bool))
+        self._apply_receiver_filters()
+        self.auto_notch.toggled.connect(self._apply_receiver_filters)
+        self.noise_reduction.toggled.connect(self._apply_receiver_filters)
         idx = self.step.findData(s.value("step", 1000, type=int))
         self.step.setCurrentIndex(idx if idx >= 0 else 3)
         self._step_changed()
@@ -481,6 +723,17 @@ class MainWindow(QMainWindow):
         s.setValue("freq_hz", st.freq_hz)
         s.setValue("mode", st.mode)
         s.setValue("passband", st.passband)
+        s.setValue("nb_enabled", self.nb_enabled.isChecked())
+        s.setValue("nb_gate_us", self.nb_gate.value())
+        s.setValue("nb_threshold", self.nb_threshold.value())
+        s.setValue("audio_bandpass_enabled", self.bandpass_enabled.isChecked())
+        s.setValue("audio_bandpass_center", self.bandpass_center.value())
+        s.setValue("audio_bandpass_width", self.bandpass_width.value())
+        s.setValue("audio_notch_enabled", self.notch_enabled.isChecked())
+        s.setValue("audio_notch_frequency", self.notch_frequency.value())
+        s.setValue("audio_notch_width", self.notch_width.value())
+        s.setValue("auto_notch", self.auto_notch.isChecked())
+        s.setValue("noise_reduction", self.noise_reduction.isChecked())
         s.setValue("step", self.step.currentData())
         s.setValue("audio_device", self.device_combo.currentData() or "")
         s.setValue("audio_enable", self.audio_enable.isChecked())
@@ -817,6 +1070,8 @@ class MainWindow(QMainWindow):
         self.session_label.setText("   ·   ".join(parts))
 
     def _tick(self, *_):
+        self._reload_quick_tune()
+        self._refresh_log()
         self._show_session(self.service.session_info())
         secs = self.radio.recording_seconds()
         if secs is not None and self._rec_started is not None:
@@ -837,6 +1092,8 @@ class MainWindow(QMainWindow):
         if self.rigctld is not None:
             self.rigctld.stop()
         self.service.shutdown()
+        logging.getLogger().removeHandler(self._log_buffer)
+        self._log_buffer.close()
         super().closeEvent(ev)
 
 
