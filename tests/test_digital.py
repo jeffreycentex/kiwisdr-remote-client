@@ -48,6 +48,15 @@ def rsid_burst(code, center):
 
 
 class TestRsid(unittest.TestCase):
+    def test_fallback_resampler_does_not_lock_to_a_weak_image(self):
+        with patch("kiwiremote.resample.HAVE_LIBSAMPLERATE", False):
+            samples = np.concatenate((np.zeros(3300, dtype=np.float32), rsid_burst(147, 1750),
+                                      np.zeros(5500, dtype=np.float32)))
+            downsampled = StreamResampler(11025, 8000).process(samples)
+            detections = RsidDetector(8000).process(downsampled)
+        self.assertEqual([item[0] for item in detections], ["MFSK32"])
+        self.assertAlmostEqual(detections[0][1], 1750, delta=1)
+
     def test_assigned_codeword_and_streaming_detection(self):
         np.testing.assert_array_equal(rsid_symbols(57), [0, 1, 0, 14, 9, 15, 8, 1, 15, 7, 8, 14, 6, 6, 9])
         for code, mode in [(57, "MFSK16"), (147, "MFSK32"), (55, "Contestia 4-250"), (620, "MFSK64")]:

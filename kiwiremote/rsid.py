@@ -67,29 +67,42 @@ class RsidDetector:
             if len(self._history) < 30 or self._clock < self._inhibit_until:
                 continue
             history = np.asarray(self._history)[1::2]
+            spectra = np.asarray(self._powers)[1::2]
             candidates = self._extended if self._clock < self._extended_until else self._primary
+            strongest = None
+            strongest_power = 0.0
             for symbols, mode in candidates:
                 errors = (history != symbols[:, None]).sum(axis=0)
-                best = int(errors.argmin())
-                if errors[best] > 1:
+                eligible = np.flatnonzero(errors <= 1)
+                if not len(eligible):
                     continue
-                estimates = []
-                for spectrum, symbol in zip(list(self._powers)[1::2], symbols):
-                    expected = self._bins[best] + 2 * int(symbol)
-                    peak = expected - 1 + int(spectrum[expected - 1:expected + 2].argmax())
-                    left, middle, right = np.log(spectrum[peak - 1:peak + 2] + 1e-30)
-                    curvature = left - 2 * middle + right
-                    offset = 0.5 * (left - right) / curvature if curvature < 0 else 0
-                    estimates.append((peak + np.clip(offset, -0.5, 0.5) - 2 * int(symbol) + 14)
-                                     * RSID_RATE / 2048)
-                center = float(np.median(estimates))
-                self._history.clear()
-                self._powers.clear()
-                if mode == "escape":
-                    self._extended_until = self._clock + 27 * SYMBOL_SAMPLES
-                else:
-                    detections.append((mode, float(center)))
-                    self._extended_until = 0
-                    self._inhibit_until = self._clock + 5 * SYMBOL_SAMPLES
-                break
+                bins = self._bins[eligible][None, :] + 2 * symbols[:, None].astype(int)
+                scores = spectra[np.arange(15)[:, None], bins].sum(axis=0)
+                best = int(scores.argmax())
+                if scores[best] > strongest_power:
+                    strongest_power = float(scores[best])
+                    strongest = (symbols, mode, int(eligible[best]))
+            # Linear resampling can leave weak spectral images with the same
+            # codeword. Select the strongest match across the entire passband.
+            if strongest is None or strongest_power < max(1e-12, spectra.sum() * 0.02):
+                continue
+            symbols, mode, best = strongest
+            estimates = []
+            for spectrum, symbol in zip(spectra, symbols):
+                expected = self._bins[best] + 2 * int(symbol)
+                peak = expected - 1 + int(spectrum[expected - 1:expected + 2].argmax())
+                left, middle, right = np.log(spectrum[peak - 1:peak + 2] + 1e-30)
+                curvature = left - 2 * middle + right
+                offset = 0.5 * (left - right) / curvature if curvature < 0 else 0
+                estimates.append((peak + np.clip(offset, -0.5, 0.5) - 2 * int(symbol) + 14)
+                                 * RSID_RATE / 2048)
+            center = float(np.median(estimates))
+            self._history.clear()
+            self._powers.clear()
+            if mode == "escape":
+                self._extended_until = self._clock + 27 * SYMBOL_SAMPLES
+            else:
+                detections.append((mode, center))
+                self._extended_until = 0
+                self._inhibit_until = self._clock + 5 * SYMBOL_SAMPLES
         return detections
