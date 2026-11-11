@@ -36,6 +36,9 @@ def main():
         obj = BUILD / ("source_%03d.o" % index)
         compiler = args.cc if source.suffix == ".c" else args.cxx
         flags = ["-std=c99"] if source.suffix == ".c" else ["-std=c++17"]
+        if windows:
+            # The upstream DSP headers use the POSIX math constants.
+            flags.append("-D_USE_MATH_DEFINES")
         if not windows:
             flags.append("-fPIC")
         subprocess.run([compiler, *flags, "-O2", "-pthread", *includes,
