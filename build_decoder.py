@@ -25,7 +25,8 @@ def main():
     sources = [VENDOR / name for name in json.loads((VENDOR / "SOURCES.json").read_text())]
     sources = [ROOT / "native/decoder_core.cpp" if path == VENDOR / "native/core_api.cpp"
                else path for path in sources]
-    includes = ["-I" + str(VENDOR / "generated" / "include"), "-I" + str(VENDOR / "native")]
+    includes = ["-I" + str(ROOT / "native"), "-I" + str(VENDOR / "generated" / "include"),
+                "-I" + str(VENDOR / "native")]
     windows = sys.platform == "win32"
     if windows:
         sources.append(VENDOR / "vendor/fldigi/src/compat/regex.c")
@@ -39,6 +40,8 @@ def main():
         if windows:
             # The upstream DSP headers use the POSIX math constants.
             flags.append("-D_USE_MATH_DEFINES")
+            if source.suffix != ".c":
+                flags.extend(["-include", str(ROOT / "native/compat.h")])
         if not windows:
             flags.append("-fPIC")
         subprocess.run([compiler, *flags, "-O2", "-pthread", *includes,
