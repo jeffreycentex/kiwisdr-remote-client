@@ -264,6 +264,7 @@ class _KiwiAudioStream(K.KiwiSDRStream):
 
     def _process_audio_samples(self, seq, samples, rssi, fmt):
         if not self._stop_event.is_set():
+            raw_samples = samples
             if self.rx_ready:
                 for audio_filter, settings in zip(
                         (self._audio_filter, self._audio_notch), self._owner.audio_filters):
@@ -271,7 +272,7 @@ class _KiwiAudioStream(K.KiwiSDRStream):
                         samples = audio_filter.process(samples, self._sample_rate, settings)
                     except ValueError as e:
                         self._owner._status(str(e), "error")
-            self._owner._on_audio(samples, rssi)
+            self._owner._on_audio(samples, rssi, raw_samples=raw_samples)
 
     def _on_sample_rate_change(self):
         pass
@@ -585,7 +586,7 @@ class RadioController:
                      % (want / 1e3, lo / 1e3, hi / 1e3, got / 1e3), "error")
         self._emit("tune", (st, "clamp"))
 
-    def _on_audio(self, samples, rssi):
+    def _on_audio(self, samples, rssi, raw_samples=None):
         self.rssi = rssi
         now = time.monotonic()
         self._last_audio = now
@@ -595,7 +596,7 @@ class RadioController:
         with self._sink_lock:
             for name, sink in list(self._sinks.items()):
                 try:
-                    sink.write(samples)
+                    sink.write(raw_samples if name == "data" and raw_samples is not None else samples)
                 except Exception as e:
                     log.exception("sink %s failed", name)
                     self._drop_sink(name, "Audio output '%s' stopped: %s" % (name, e))
@@ -634,6 +635,9 @@ class RadioController:
         sink = SoundCardSink(device_key, gain) if device_key else None
         return self._install_sink("card", sink)
 
+    def set_data_decoder(self, sink):
+        return self._install_sink("data", sink)
+
     def start_recording(self, path):
         sink = make_file_sink(path)
         if not self._connected:
@@ -670,4 +674,5 @@ class RadioController:
     def shutdown(self):
         self.disconnect()
         self.stop_recording()
+        self._install_sink("data", None)
         self._install_sink("card", None)

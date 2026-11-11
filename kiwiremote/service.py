@@ -115,6 +115,10 @@ class KiwiService:
         self._session = None
         self._rec_deadline = None
         self._rec_max = None
+        self._data_session = 0
+        self._data_decoder = None
+        from .flamp import FlampWorker
+        self._flamp = FlampWorker(self._emit)
         self.radio = RadioController(on_event=self._on_radio_event, compression=compression)
         self._stop = threading.Event()
         self._shutdown_lock = threading.Lock()
@@ -144,6 +148,17 @@ class KiwiService:
                     s.local = is_local_address(self.radio.peer_address())
                     self._apply_policy(s)
                 self._emit("session", self.session_info())
+        self._emit(kind, payload)
+
+    def _on_data_event(self, kind, payload):
+        if kind == "data_raw":
+            self._flamp.feed(payload["data"])
+            return
+        if kind == "data_state" and not payload["active"]:
+            try:
+                self._flamp.submit("flush")
+            except RuntimeError as error:
+                self._emit("flamp_status", str(error))
         self._emit(kind, payload)
 
     def _apply_policy(self, s):
@@ -254,6 +269,55 @@ class KiwiService:
     @command
     def set_noise_filters(self, denoise, auto_notch):
         self.radio.set_noise_filters(denoise, auto_notch)
+
+    @command
+    def start_data(self, mode, sweetspot_hz=1500, *, squelch=True, threshold=20, source=None):
+        from .digital import DataDecoderSink, validate_data_mode
+        center = validate_data_mode(mode, sweetspot_hz)
+        if type(threshold) is not int or not 0 <= threshold <= 100:
+            raise ValueError("squelch threshold must be between 0 and 100")
+        if source is not None:
+            from .audiofile import local_audio_path
+            source = local_audio_path(source)
+        self.stop_data()
+        self._flamp.submit("reset")
+        self._data_session += 1
+        sink = DataDecoderSink(mode, center, self._on_data_event, self._data_session,
+                               squelch=squelch, threshold=threshold, source=source)
+        try:
+            if source is None and not self.radio.set_data_decoder(sink):
+                raise RuntimeError("Could not start digital decoder")
+        except Exception:
+            sink.close()
+            raise
+        self._data_decoder = sink
+
+    @command
+    def stop_data(self):
+        self.radio.set_data_decoder(None)
+        if self._data_decoder is not None and self._data_decoder.source is not None:
+            self._data_decoder.close()
+        self._data_decoder = None
+
+    @command
+    def set_data_squelch(self, enabled, threshold):
+        if self._data_decoder is not None:
+            self._data_decoder.set_squelch(enabled, threshold)
+
+    @command
+    def configure_flamp(self, directory, auto_save=True):
+        folder = os.path.abspath(os.path.expanduser(str(directory)))
+        if not str(directory).strip():
+            raise ValueError("Choose a FLAMP receive folder")
+        self._flamp.submit("configure", (folder, bool(auto_save)))
+
+    @command
+    def save_flamp(self, identifier):
+        self._flamp.submit("save", identifier)
+
+    @command
+    def clear_flamp(self, identifier=None):
+        self._flamp.submit("clear", identifier)
 
     # ------------------------------------------------------------------ recording
     def recording_path_for(self, path=None, directory=None, name=None, formats=(".wav",)):
@@ -446,6 +510,8 @@ class KiwiService:
 
     def _shutdown(self):
         try:
+            self.stop_data()
+            self._flamp.close()
             self.stop_recording(reason="shutdown")
         finally:
             self.radio.shutdown()

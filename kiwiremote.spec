@@ -13,6 +13,11 @@ KC = os.path.join("third_party", "kiwiclient")
 if not os.path.isfile(os.path.join(KC, "kiwi", "client.py")):
     raise SystemExit("Run 'python fetch_kiwiclient.py' first")
 sys.path.insert(0, KC)
+decoder_name = "kiwi-data-decoder.exe" if sys.platform == "win32" else "kiwi-data-decoder"
+decoder = os.path.join(SPECPATH, "build", "decoder", decoder_name)
+if not os.path.isfile(decoder):
+    raise SystemExit("Run 'python build_decoder.py' before building the application")
+licenses = os.path.join(SPECPATH, "third_party", "fldigi-core")
 
 hidden = (["kiwi", "kiwi.client", "kiwi.worker", "kiwi.rigctld", "kiwi.wavreader",
            "kiwi.wsclient", "chunk"]
@@ -25,6 +30,14 @@ for optional in ("samplerate", "av"):
         print("NOTE: optional package %r not installed; build will lack it" % optional)
 
 a = Analysis(["run_kiwiremote.py"], pathex=[".", KC], hiddenimports=hidden,
+             binaries=[(decoder, "decoder")],
+             datas=[(os.path.join(licenses, "COPYING"), "licenses/fldigi-core"),
+                    (os.path.join(licenses, "COPYING.LESSER"), "licenses/fldigi-core"),
+                    (os.path.join(licenses, "THIRD_PARTY_NOTICES.md"), "licenses/fldigi-core"),
+                    (os.path.join(licenses, "README.md"), "licenses/fldigi-core"),
+                    (os.path.join(licenses, "vendor", "fldigi", "AUTHORS"), "licenses/fldigi-core"),
+                    (os.path.join(licenses, "vendor", "fldigi", "SOURCE.json"), "licenses/fldigi-core"),
+                    (os.path.join(licenses, "web", "licenses", "*"), "licenses/tiniconv")],
              excludes=["tkinter"], noarchive=False)
 pyz = PYZ(a.pure)
 assets = os.path.join(SPECPATH, "assets")

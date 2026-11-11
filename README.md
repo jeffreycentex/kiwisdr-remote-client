@@ -18,7 +18,8 @@ See the [changelog](CHANGELOG.md) for release details.
 - **Record:** native-rate mono WAV, or AAC in M4A/MP4 when PyAV is installed.
 - **Control:** hamlib NET rigctl on `127.0.0.1:4532`, plus an HTTP/JSON API on `127.0.0.1:7373`.
 - **Run headless:** connect, tune and record without loading Qt.
-- **Use a compact desktop:** a 680 × 600 light-mode window with Listen, Audio, DSP, Automation and Log tabs. Smaller windows scroll, and window geometry is saved.
+- **Decode digital text:** MFSK16, MFSK32, MFSK64, and Contestia 4-250 directly from the receiver audio on the Data tab.
+- **Use a compact desktop:** a 680 × 600 light-mode window with Listen, Audio, DSP, Automation, Data, FLAMP and Log tabs. Smaller windows scroll, and window geometry is saved.
 
 The GUI, API and hamlib tuning share one service command queue. Recording has a
 separate bounded writer, exclusive file creation, and WAV rotation at 1 GiB.
@@ -36,6 +37,7 @@ python -m venv .venv
 source .venv/bin/activate
 # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+python build_decoder.py
 python run_kiwiremote.py
 ```
 
@@ -45,6 +47,12 @@ resampling and is skipped on Windows; linear interpolation is the fallback.
 PyAV supplies M4A/MP4 recording. WAV works without it. SciPy supplies the local
 Audio Bandpass and Manual Notch filters. `certifi` supplements the
 system TLS trust store.
+
+Source installations need a C compiler and a C++17 compiler to build the bundled
+digital decoder. On macOS use the Xcode command line tools, on Linux use GCC,
+and on Windows use MinGW-w64 through MSYS2. For Windows run
+`python build_decoder.py --cc gcc --cxx g++` in the UCRT64 environment.
+The packaged application includes the decoder.
 
 The Python package and launchers retain their original names (`kiwiremote`,
 `run_kiwiremote.py`, and `kiwiremote-cli`) for compatibility. The desktop app is
@@ -59,6 +67,70 @@ still named **KiwiSDR Remote**.
 5. Use **Automation** to configure rigctld, the API and session limits.
 6. Use **DSP** to enable the KiwiSDR noise blanker and set its gate time and threshold.
 7. Use **Log → Export log…** to save the latest 2,000 lines of the session log as plain text.
+
+### Digital text reception
+
+Tune the receiver on **Listen**, normally in USB, and set a receiver bandwidth
+that includes the complete digital signal. On **Data**, select MFSK16, MFSK32,
+MFSK64, or Contestia 4-250, enter the signal's audio center in **Sweetspot**, and
+choose **Start decoding**. The sweetspot is measured in audio Hz. It does not
+change the radio frequency. Use **Stop decoding** before changing the mode or
+sweetspot.
+
+**Squelch** starts enabled with a threshold of 20. The **Quality** meter shows
+the modem's receive metric from 0 to 100, and **Open/Closed** shows whether that
+metric meets the threshold. Adjust the threshold while decoding to suppress
+noise characters without restarting the modem.
+
+Choose **Auto (RSID)** to listen for mode announcements and set the modem and
+audio center automatically. Auto recognizes MFSK16, MFSK32, MFSK64, and
+Contestia 4-250. MFSK64 uses the extended RSID sequence. Auto needs an RSID
+announcement in the incoming audio. Select a mode and sweetspot manually for
+signals that have no announcement.
+
+To decode a recording, select **Audio file**, choose a file, then start decoding.
+Files run through the same squelch and Auto detector as receiver audio and finish
+automatically at the end. PCM WAV files work with the minimal dependencies.
+PyAV adds formats such as M4A, MP4, FLAC, Ogg, and MP3. File decoding works
+without connecting a receiver, and **Stop decoding** cancels processing.
+
+Decoded text appears continuously in the Data pane. **Clear text** clears the
+display. Starting reception also works before the receiver connects, and the
+decoder resets its modem state when the receiver reconnects.
+Mode, sweetspot, and squelch settings are remembered, while decoding starts off.
+
+The decoder receives the Kiwi audio before the local Audio Bandpass and Manual
+Notch filters. Receiver-side Auto Notch and Noise Reduction still affect that
+audio, so turn them off for data reception.
+
+### FLAMP file reception
+
+The **FLAMP** tab assembles file-transfer frames received through Data from
+either receiver audio or a recording. Each row shows the file, received and
+total blocks, missing block numbers, and save status. Frames must pass their
+CRC checks before their contents are accepted.
+
+Choose a receive folder. **Automatically save completed files** starts enabled.
+On macOS the default is `~/Documents/KiwiSDR/Received`. Disable automatic saving
+to review completed transfers and use **Save selected**. Existing files are
+preserved by creating a numbered filename when necessary.
+
+Incomplete transfers remain in memory while the application is open. Stopping
+and restarting Data decoding keeps valid blocks. A later transmission of the
+same transfer can fill gaps, and repeated blocks are ignored. Transfers are
+tracked separately by their FLAMP identifier. Conflicting metadata or block
+contents are reported for review. **Clear selected transfer** resets that
+transfer's receive state and leaves any saved file in place.
+
+Plain files, BASE64, BASE128, BASE256, and FLAMP's LZMA compression are supported.
+File contents are saved as received. A file's embedded digital signature is
+not authenticated by the receiver. Reception is limited to 32 transfers,
+32 MiB per file, and 64 MiB of retained transfer data.
+
+The bundled engine uses the GPL fldigi modem implementation and requires no
+fldigi installation or virtual audio cable. Its pinned source, licenses and
+build provenance are in [third_party/fldigi-core](third_party/fldigi-core/README.md).
+THOR is deferred.
 
 ### Audio filters
 
@@ -175,6 +247,10 @@ and PyAV recording tests run when those dependencies are installed; otherwise th
 are skipped. Qt tests run offscreen with isolated settings. CI runs the suite on
 Linux, Windows and macOS with Python 3.10 and 3.13.
 
+Build `python build_decoder.py --test-library` to enable the additional native
+known-text checks. They generate signals in memory for all four supported modes,
+then decode them using the same helper bundled with the application.
+
 This client has been validated locally on macOS with real Qt and PyAV, a standalone
 app build, and live tuning/WAV recording against
 `newbraunfels.proxy.kiwisdr.com:8073`. That verifies receiving and recording;
@@ -184,6 +260,7 @@ physical audio devices and decoder applications still need testing on each syste
 
 ```bash
 python -m pip install -r requirements.txt pyinstaller
+python build_decoder.py
 pyinstaller --noconfirm kiwiremote.spec
 ```
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1 — digitalmodes branch
+
+- Added embedded MFSK16, MFSK32, MFSK64, and Contestia 4-250 decoding on the Data tab.
+- Added live decoder squelch, a quality meter, and RSID Auto mode for the four supported modes.
+- Added audio-file decoding alongside receiver audio.
+- Added FLAMP file assembly and saving, including CRC validation, missing-block tracking, repeated transmissions, binary encodings, and LZMA decompression.
+- Included the pinned GPL decoder source, license notices, native build tooling, and automated known-text tests.
+
 ## 1.1
 
 - Added AMN, AMW, and FMN tuning modes.

@@ -12,6 +12,9 @@ on:
     paths:
       - assets/kiwiremote.*
       - kiwiremote.spec
+      - build_decoder.py
+      - native/**
+      - third_party/fldigi-core/**
       - requirements.txt
       - run_kiwiremote.py
       - .github/workflows/build.yml
@@ -59,6 +62,22 @@ jobs:
           if [ "$RUNNER_OS" != "Windows" ]; then
             python -m pip install "samplerate>=0.2.1" || echo "::warning::samplerate not installed; linear resampling"
           fi
+
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Build digital decoder (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: python build_decoder.py --cc gcc --cxx g++ --test-library
+
+      - name: Build digital decoder (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: python build_decoder.py --test-library
 
       - name: Tests
         run: python -m unittest discover -s tests

@@ -12,16 +12,17 @@ from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence, QColor, QPalette
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase, QKeySequence, QColor, QPalette
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox,
-    QScrollArea, QTabWidget, QStatusBar, QVBoxLayout, QWidget)
+    QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QStatusBar, QVBoxLayout, QWidget)
 
 from . import __version__
 from .api import DEFAULT_PORT as API_DEFAULT_PORT, ApiServer
 from .dsp import DEFAULT_AUDIO_BANDPASS, DEFAULT_AUDIO_NOTCH, HAVE_SCIPY
+from .digital import DATA_MODES
 from .rigctld import RigctldServer
 from .service import ApiError, KiwiService, SessionPolicy, default_record_dir
 from .sinks import (HAVE_PYAV, HAVE_SOUNDDEVICE, PULSE_PREFIX, create_virtual_cable,
@@ -119,6 +120,9 @@ class MainWindow(QMainWindow):
         self.rigctld = None
         self.api = None
         self._rec_started = None
+        self._data_session = 0
+        self._data_active = False
+        self._flamp_transfers = []
 
         self.resize(680, 600)
         self.setMinimumSize(560, 460)
@@ -171,6 +175,8 @@ class MainWindow(QMainWindow):
             scroll.setFrameShape(QScrollArea.NoFrame)
             scroll.setWidget(page)
             self.tabs.addTab(scroll, title)
+        self.tabs.addTab(self._build_data_tab(), "Data")
+        self.tabs.addTab(self._build_flamp_tab(), "FLAMP")
         self.tabs.addTab(self._build_log_tab(), "Log")
         self.menuBar().addMenu("&File").addAction("Edit quick-tune presets…", self._edit_quick_tune)
         self.setCentralWidget(central)
@@ -466,10 +472,249 @@ class MainWindow(QMainWindow):
         layout.addWidget(export, alignment=Qt.AlignRight)
         return page
 
+    def _build_data_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        controls = QHBoxLayout()
+        self.data_mode = QComboBox()
+        self.data_mode.addItems(list(DATA_MODES))
+        self.data_mode.setAccessibleName("Digital mode")
+        mode_label = QLabel("Mode")
+        mode_label.setBuddy(self.data_mode)
+        controls.addWidget(mode_label)
+        controls.addWidget(self.data_mode)
+        self.data_sweetspot = QDoubleSpinBox(decimals=1, singleStep=25, suffix=" Hz")
+        self.data_sweetspot.setKeyboardTracking(False)
+        self.data_sweetspot.setAccessibleName("Digital signal audio center")
+        sweetspot_label = QLabel("Sweetspot")
+        sweetspot_label.setBuddy(self.data_sweetspot)
+        controls.addWidget(sweetspot_label)
+        controls.addWidget(self.data_sweetspot)
+        self.data_start = QPushButton("Start decoding")
+        self.data_start.clicked.connect(self._toggle_data)
+        controls.addWidget(self.data_start)
+        controls.addStretch()
+        layout.addLayout(controls)
+        source_row = QHBoxLayout()
+        self.data_source = QComboBox()
+        self.data_source.addItems(["Receiver audio", "Audio file"])
+        self.data_source.setAccessibleName("Decoder audio source")
+        self.data_file = QLineEdit(readOnly=True, placeholderText="Choose an audio recording…")
+        self.data_file.setAccessibleName("Audio recording path")
+        self.data_choose_file = QPushButton("Choose…")
+        self.data_choose_file.clicked.connect(self._choose_data_file)
+        source_row.addWidget(self.data_source)
+        source_row.addWidget(self.data_file, 1)
+        source_row.addWidget(self.data_choose_file)
+        layout.addLayout(source_row)
+        squelch_row = QHBoxLayout()
+        self.data_squelch = QCheckBox("Squelch", checked=True)
+        self.data_threshold = QSpinBox(minimum=0, maximum=100, value=20)
+        self.data_threshold.setKeyboardTracking(False)
+        self.data_threshold.setAccessibleName("Decoder squelch threshold")
+        squelch_row.addWidget(self.data_squelch)
+        squelch_row.addWidget(self.data_threshold)
+        squelch_row.addWidget(QLabel("Quality"))
+        self.data_quality = QProgressBar(minimum=0, maximum=100, value=0)
+        self.data_quality.setToolTip("Decoder quality, 0–100. Squelch suppresses text below the threshold.")
+        squelch_row.addWidget(self.data_quality, 1)
+        self.data_gate = QLabel("Closed")
+        squelch_row.addWidget(self.data_gate)
+        layout.addLayout(squelch_row)
+        hint = QLabel("Tune the receiver on Listen, normally in USB. Sweetspot is the signal's "
+                      "center in audio Hz. For decoding, turn off Auto Notch and Noise Reduction "
+                      "on DSP.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.data_status = QLabel("Decoding stopped")
+        self.data_status.setWordWrap(True)
+        layout.addWidget(self.data_status)
+        self.data_text = QPlainTextEdit(readOnly=True, maximumBlockCount=2000)
+        self.data_text.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self.data_text.setAccessibleName("Decoded digital text")
+        self.data_text.setPlaceholderText("Decoded text will appear here.")
+        layout.addWidget(self.data_text, 1)
+        clear = QPushButton("Clear text")
+        clear.clicked.connect(self.data_text.clear)
+        layout.addWidget(clear, alignment=Qt.AlignRight)
+        self.data_mode.currentTextChanged.connect(self._data_mode_changed)
+        self.data_source.currentIndexChanged.connect(self._data_source_changed)
+        self.data_squelch.toggled.connect(self._data_squelch_changed)
+        self.data_threshold.valueChanged.connect(self._data_squelch_changed)
+        self._data_mode_changed()
+        self._data_source_changed()
+        return page
+
+    def _data_mode_changed(self, *_):
+        half = DATA_MODES[self.data_mode.currentText()] / 2
+        self.data_sweetspot.setRange(half + 1, 3000 - half - 1)
+        self.data_sweetspot.setEnabled(not self._data_active and self.data_mode.currentText() != "Auto (RSID)")
+
+    def _data_source_changed(self, *_):
+        file_input = self.data_source.currentIndex() == 1
+        self.data_file.setEnabled(file_input and not self._data_active)
+        self.data_choose_file.setEnabled(file_input and not self._data_active)
+
+    def _choose_data_file(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Choose audio to decode", self.data_file.text(),
+            "Audio recordings (*.wav *.m4a *.mp4 *.flac *.ogg *.mp3);;All files (*)")
+        if filename:
+            self.data_file.setText(filename)
+
+    def _data_squelch_changed(self, *_):
+        self.data_threshold.setEnabled(self.data_squelch.isChecked())
+        self.data_gate.setText("Open" if not self.data_squelch.isChecked()
+                              or self.data_quality.value() >= self.data_threshold.value() else "Closed")
+        self.service.set_data_squelch(self.data_squelch.isChecked(), self.data_threshold.value())
+
+    def _toggle_data(self):
+        try:
+            if self._data_active:
+                self.service.stop_data()
+            else:
+                self.service.start_data(
+                    self.data_mode.currentText(), self.data_sweetspot.value(),
+                    squelch=self.data_squelch.isChecked(), threshold=self.data_threshold.value(),
+                    source=self.data_file.text() if self.data_source.currentIndex() == 1 else None)
+        except (ValueError, RuntimeError, OSError) as error:
+            self.data_status.setText(str(error))
+
+    def _append_data_text(self, text):
+        cursor = self.data_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        for part in text.split("\b")[:-1]:
+            cursor.insertText(part)
+            cursor.deletePreviousChar()
+        cursor.insertText(text.rsplit("\b", 1)[-1])
+        # A transmission may contain no newline for hours.
+        excess = self.data_text.document().characterCount() - 200000
+        if excess > 0:
+            cursor.setPosition(0)
+            cursor.setPosition(excess, cursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        self.data_text.moveCursor(cursor.MoveOperation.End)
+
     def _refresh_log(self):
         batch = self._log_buffer.drain()
         if batch:
             self.log_view.appendPlainText(batch)
+
+    def _build_flamp_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        hint = QLabel("Files received through Data appear here. Valid blocks are retained across "
+                      "repeats while the app is open, so later transmissions can fill missing blocks.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        folder_row = QHBoxLayout()
+        self.flamp_directory = QLineEdit()
+        self.flamp_directory.setAccessibleName("FLAMP receive folder")
+        self.flamp_directory.editingFinished.connect(self._configure_flamp)
+        choose = QPushButton("Choose folder…")
+        choose.clicked.connect(self._choose_flamp_folder)
+        folder_row.addWidget(self.flamp_directory, 1)
+        folder_row.addWidget(choose)
+        layout.addLayout(folder_row)
+        self.flamp_auto_save = QCheckBox("Automatically save completed files", checked=True)
+        self.flamp_auto_save.toggled.connect(self._configure_flamp)
+        layout.addWidget(self.flamp_auto_save)
+        self.flamp_table = QTableWidget(0, 5)
+        self.flamp_table.setHorizontalHeaderLabels(["File", "Blocks", "Missing", "Status", "ID"])
+        self.flamp_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.flamp_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.flamp_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.flamp_table.verticalHeader().hide()
+        self.flamp_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.flamp_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.flamp_table.itemSelectionChanged.connect(self._flamp_selection_changed)
+        layout.addWidget(self.flamp_table, 1)
+        self.flamp_details = QLabel("No FLAMP transfers received")
+        self.flamp_details.setTextFormat(Qt.PlainText)
+        self.flamp_details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.flamp_details.setWordWrap(True)
+        layout.addWidget(self.flamp_details)
+        self.flamp_status = QLabel("")
+        self.flamp_status.setTextFormat(Qt.PlainText)
+        self.flamp_status.setWordWrap(True)
+        layout.addWidget(self.flamp_status)
+        row = QHBoxLayout()
+        self.flamp_save = QPushButton("Save selected")
+        self.flamp_save.setEnabled(False)
+        self.flamp_save.clicked.connect(self._save_flamp)
+        self.flamp_clear = QPushButton("Clear selected transfer")
+        self.flamp_clear.setEnabled(False)
+        self.flamp_clear.clicked.connect(self._clear_flamp)
+        row.addWidget(self.flamp_save)
+        row.addWidget(self.flamp_clear)
+        row.addStretch()
+        layout.addLayout(row)
+        return page
+
+    def _configure_flamp(self, *_):
+        try:
+            self.service.configure_flamp(self.flamp_directory.text(), self.flamp_auto_save.isChecked())
+            return True
+        except (ValueError, RuntimeError) as error:
+            self.flamp_status.setText(str(error))
+            return False
+
+    def _choose_flamp_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "FLAMP receive folder", self.flamp_directory.text())
+        if folder:
+            self.flamp_directory.setText(folder)
+            self._configure_flamp()
+
+    def _selected_flamp(self):
+        row = self.flamp_table.currentRow()
+        return self._flamp_transfers[row] if 0 <= row < len(self._flamp_transfers) else None
+
+    def _flamp_selection_changed(self):
+        transfer = self._selected_flamp()
+        self.flamp_save.setEnabled(bool(transfer and transfer["ready"]))
+        self.flamp_clear.setEnabled(transfer is not None)
+        if transfer:
+            detail = "%s · %s" % (transfer["filename"], transfer["status"])
+            if transfer["sender"]:
+                detail += "\nFrom " + transfer["sender"]
+            if transfer["missing"]:
+                detail += "\nMissing blocks: " + transfer["missing"]
+            if transfer["path"]:
+                detail += "\n" + transfer["path"]
+            self.flamp_details.setText(detail)
+        else:
+            self.flamp_details.setText("No FLAMP transfer selected")
+
+    def _show_flamp_transfers(self, transfers):
+        previous = self._selected_flamp()
+        identifier = previous["id"] if previous else None
+        self._flamp_transfers = transfers
+        self.flamp_table.blockSignals(True)
+        self.flamp_table.setRowCount(len(transfers))
+        for row, transfer in enumerate(transfers):
+            total = "?" if transfer["total"] is None else str(transfer["total"])
+            values = [transfer["filename"], "%d / %s" % (transfer["received"], total),
+                      transfer["missing"], transfer["status"], transfer["id"]]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.flamp_table.setItem(row, column, item)
+            if transfer["id"] == identifier:
+                self.flamp_table.selectRow(row)
+        if transfers and self.flamp_table.currentRow() < 0:
+            self.flamp_table.selectRow(0)
+        self.flamp_table.blockSignals(False)
+        self._flamp_selection_changed()
+
+    def _save_flamp(self):
+        transfer = self._selected_flamp()
+        if transfer and self._configure_flamp():
+            self.service.save_flamp(transfer["id"])
+
+    def _clear_flamp(self):
+        transfer = self._selected_flamp()
+        if transfer:
+            self.service.clear_flamp(transfer["id"])
 
     def _export_log(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export log", "kiwisdr-remote.log",
@@ -634,6 +879,16 @@ class MainWindow(QMainWindow):
 
     def _load_settings(self):
         s = self.settings
+        mode = s.value("data_mode", "MFSK32")
+        self.data_mode.setCurrentText(mode if mode in DATA_MODES else "MFSK32")
+        self.data_sweetspot.setValue(s.value("data_sweetspot_hz", 1500, type=float))
+        self.data_squelch.setChecked(s.value("data_squelch", True, type=bool))
+        self.data_threshold.setValue(s.value("data_threshold", 20, type=int))
+        default_flamp = str(Path(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation))
+                            / "KiwiSDR" / "Received")
+        self.flamp_directory.setText(s.value("flamp_directory", default_flamp))
+        self.flamp_auto_save.setChecked(s.value("flamp_auto_save", True, type=bool))
+        self._configure_flamp()
         hist = s.value("server_history", [], type=list) or []
         self.server_combo.addItems(hist)
         self.server_combo.setCurrentText(s.value("server", hist[0] if hist else ""))
@@ -713,6 +968,12 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         s = self.settings
+        s.setValue("data_mode", self.data_mode.currentText())
+        s.setValue("data_sweetspot_hz", self.data_sweetspot.value())
+        s.setValue("data_squelch", self.data_squelch.isChecked())
+        s.setValue("data_threshold", self.data_threshold.value())
+        s.setValue("flamp_directory", self.flamp_directory.text())
+        s.setValue("flamp_auto_save", self.flamp_auto_save.isChecked())
         hist = [self.server_combo.itemText(i) for i in range(self.server_combo.count())]
         s.setValue("server_history", hist)
         s.setValue("server", self.server_combo.currentText())
@@ -983,7 +1244,36 @@ class MainWindow(QMainWindow):
     # ================================================================== events (GUI thread)
     @Slot(str, object)
     def _on_event(self, kind, payload):
-        if kind == "tune":
+        if kind == "flamp_transfers":
+            self._show_flamp_transfers(payload)
+        elif kind == "flamp_status":
+            self.flamp_status.setText(payload)
+        elif kind in ("data_state", "data_text", "data_quality"):
+            session = payload["session"]
+            if session < self._data_session:
+                return
+            self._data_session = session
+            if kind == "data_text":
+                self._append_data_text(payload["text"])
+            elif kind == "data_quality":
+                self.data_quality.setValue(round(payload["value"]))
+                self.data_gate.setText("Open" if not self.data_squelch.isChecked()
+                                      or self.data_quality.value() >= self.data_threshold.value() else "Closed")
+            else:
+                self._data_active = payload["active"]
+                if (self.data_mode.currentText() == "Auto (RSID)"
+                        and payload.get("state") == "receiving" and "sweetspot_hz" in payload):
+                    self.data_sweetspot.setValue(payload["sweetspot_hz"])
+                self.data_start.setText("Stop decoding" if self._data_active else "Start decoding")
+                self.data_mode.setEnabled(not self._data_active)
+                self._data_mode_changed()
+                self.data_source.setEnabled(not self._data_active)
+                self._data_source_changed()
+                if not self._data_active:
+                    self.data_quality.setValue(0)
+                    self.data_gate.setText("Closed" if self.data_squelch.isChecked() else "Open")
+                self.data_status.setText(payload["message"])
+        elif kind == "tune":
             st, source = payload
             self._show_tune(st)
             if source == "rigctl":
