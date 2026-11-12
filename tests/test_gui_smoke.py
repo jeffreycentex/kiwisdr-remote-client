@@ -4,6 +4,7 @@ import importlib.util
 import logging
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -31,7 +32,7 @@ class TestGui(unittest.TestCase):
                   patch.object(gui.QStandardPaths, 'writableLocation', return_value=directory),
                   patch.object(gui, 'list_output_devices', return_value=[])):
                 window = gui.MainWindow()
-            kiwi = FakeKiwi()
+            kiwi = FakeKiwi(password="test password%23")
             try:
                 window.show()
                 app.processEvents()
@@ -119,7 +120,15 @@ class TestGui(unittest.TestCase):
                 with patch.object(gui.QFileDialog, "getSaveFileName", return_value=(str(exported), "")):
                     window._export_log()
                 self.assertIn("Test log export", exported.read_text(encoding="utf-8"))
-                window.service.connect('127.0.0.1:%d' % kiwi.port, wait=5)
+                window.server_combo.setCurrentText('127.0.0.1:%d' % kiwi.port)
+                window.password.setText("test password%23")
+                window.connect_btn.click()
+                deadline = time.monotonic() + 5
+                while not window.radio.connected and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+                self.assertTrue(window.radio.connected)
+                self.assertIn("SET auth t=kiwi p=test%20password%2523 ipl=test%20password%2523", kiwi.commands)
                 window.service.tune(freq_hz=7100000, mode='LSB')
                 app.processEvents()
                 self.assertEqual(window.freq.value(), 7100)

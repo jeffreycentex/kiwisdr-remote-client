@@ -139,6 +139,38 @@ class TestSessionPolicy(ServiceCase):
         self.assertEqual(st["state"], "failed")
         self.assertIn("password", st["last_error"].lower())
 
+    def test_password_encoding_and_redaction(self):
+        from urllib.parse import quote
+        cases = [("spaces", "space inside"), ("percent", "literal%20percent"),
+                 ("sentinel", "#"), ("punctuation", "plus+amp&"), ("unicode", "kiwi-é")]
+        for kind, password in cases:
+            with self.subTest(case=kind):
+                kiwi = self.kiwi(password=password)
+                service = self.service()
+                with self.assertLogs(level="DEBUG") as logs:
+                    status = service.connect("127.0.0.1:%d" % kiwi.port, password=password, wait=8)
+                self.assertEqual(status["state"], "connected")
+                auth = [command for command in kiwi.commands if command.startswith("SET auth")]
+                self.assertIn("SET auth t=kiwi p=" + quote(password, safe="") + " ipl=" + quote(password, safe=""), auth)
+                self.assertTrue(any("credentials redacted" in entry for entry in logs.output))
+                self.assertFalse(any(" p=" in entry and "SET auth" in entry for entry in logs.output))
+                service.shutdown()
+
+    def test_receiver_time_limit_password(self):
+        kiwi = self.kiwi(tlimit_password="Exempt42")
+        service = self.service()
+        status = service.connect("127.0.0.1:%d" % kiwi.port, password="Exempt42", wait=5)
+        self.assertEqual(status["state"], "connected")
+
+    def test_receiver_time_limit_rejection_stops_setup(self):
+        kiwi = self.kiwi(tlimit_password="Exempt42")
+        service = self.service()
+        status = service.connect("127.0.0.1:%d" % kiwi.port, password="wrong", wait=5)
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("time limit", status["last_error"])
+        self.assertFalse(any(c.startswith(("SET ident_user", "SET mod=")) for c in kiwi.commands))
+        self.assertEqual(kiwi.connections, 1)
+
     def test_override_beats_exemption(self):
         k = self.kiwi()
         svc = self.service()

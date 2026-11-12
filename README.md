@@ -60,7 +60,7 @@ still named **KiwiSDR Remote**.
 
 ## Desktop quick start
 
-1. Enter `host:port`, or `https://host[:port]` for a TLS receiver. Supply a receiver password only if needed, then choose **Connect**.
+1. Enter `host:port`, or `https://host[:port]` for a TLS receiver. Supply a receiver password only if needed, then choose **Connect**. The password is sent for both receiver access and Kiwi’s daily IP time-limit exemption; an exemption requires a match with the password configured by the receiver owner.
 2. Set frequency in kHz, mode and bandwidth on **Listen**.
 3. Choose an output device on **Audio**. For decoding software, select a virtual cable rather than speakers. See [virtual audio setup](docs/VIRTUAL_AUDIO.md).
 4. In **Audio → Record to file**, select a format and folder, then choose **Record**. **Open** reveals the output folder.

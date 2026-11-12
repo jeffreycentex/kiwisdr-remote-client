@@ -19,7 +19,7 @@ import ssl
 import threading
 import time
 import types
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from . import kiwi_import as K
 from .dsp import AudioFilter, DEFAULT_AUDIO_BANDPASS, DEFAULT_AUDIO_NOTCH
@@ -111,7 +111,7 @@ def _make_options(server, tune, compression):
     """Build the options object kiwiclient's KiwiSDRStream reads attributes from."""
     return types.SimpleNamespace(
         server_host=server.host, server_port=server.port,
-        password=server.password, tlimit_password="", user=server.user,
+        password=server.password, tlimit_password=server.password, user=server.user,
         admin=False, nolocal=False, no_api=False, bad_cmd=False,
         modulation=MODES[tune.mode], frequency=tune.freq_hz / 1000.0,
         lp_cut=None, hp_cut=None, freq_pbc=False,
@@ -198,6 +198,19 @@ class _KiwiAudioStream(K.KiwiSDRStream):
             self._stream.send_message(msg)
             return
         super()._send_message(msg)
+
+    def _set_auth(self, client_type, password="", tlimit_password=""):
+        # Kiwi tokenizes before URL-decoding. Encode whitespace, literal percent
+        # escapes and the '#' empty-password sentinel like the web client does.
+        super()._set_auth(client_type, quote(password, safe=""), quote(tlimit_password, safe=""))
+
+    def _process_msg_param(self, name, value):
+        if name == "ip_limit":
+            # Authentication did not complete. Stop before any following setup
+            # messages can trigger tuning commands, and do not retry the limit.
+            raise K.KiwiDownError(
+                "Receiver's daily IP time limit exceeded; enter its time-limit exemption password")
+        return super()._process_msg_param(name, value)
 
     # Called by kiwiclient when the server sends sample_rate (start of audio).
     def _setup_rx_params(self):

@@ -229,6 +229,7 @@ class MainWindow(QMainWindow):
         self.server_combo.lineEdit().returnPressed.connect(self._connect_clicked)
         self.server_combo.textActivated.connect(self._server_picked)
         self.password = QLineEdit(echoMode=QLineEdit.Password, placeholderText="(optional)")
+        self.password.setToolTip("Receiver access or daily time-limit exemption password")
         self.user_name = QLineEdit(placeholderText="shown in the Kiwi user list")
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.setObjectName("connectAction")
