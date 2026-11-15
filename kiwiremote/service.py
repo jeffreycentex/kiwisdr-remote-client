@@ -177,6 +177,25 @@ class KiwiService:
         s.limit_s = limit * 60.0 if limit and limit > 0 else None
         s.reset_s = reset * 60.0 if reset and reset > 0 else None
 
+    @command
+    def set_audio_output(self, device_key, gain=1.0, output=1):
+        self._validate_audio_output(output, gain)
+        ok = self.radio.set_audio_device(device_key, gain, output=output)
+        self._emit("audio_output", {"output": output, "enabled": bool(device_key) and ok})
+        return ok
+
+    @command
+    def set_audio_gain(self, gain, output=1):
+        self._validate_audio_output(output, gain)
+        self.radio.set_audio_gain(gain, output=output)
+
+    @staticmethod
+    def _validate_audio_output(output, gain):
+        if output not in (1, 2):
+            raise ValueError("audio output must be 1 or 2")
+        if not math.isfinite(gain) or not 0 <= gain <= 2:
+            raise ValueError("audio gain must be between 0 and 2")
+
     # ------------------------------------------------------------------ connection
     def connect(self, server, password="", user=None, wait=0.0,
                 session_limit_min=None, reset_interval_min=None, compression=None, tls=False):
@@ -435,7 +454,7 @@ class KiwiService:
             "s_meter_dbm": None if r.rssi is None or not r.connected else round(r.rssi, 1),
             "session": self.session_info(),
             "recording": self.recording_info(),
-            "audio_output": "card" in r._sinks,
+            "audio_output": any(name in r._sinks for name in ("card", "card2")),
         }
 
     # ------------------------------------------------------------------ timers

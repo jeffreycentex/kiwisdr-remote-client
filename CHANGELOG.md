@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3 — 2026-11-15
+
+- Added simultaneous playback to two audio devices, such as speakers and BlackHole 2ch, with independent gain controls and saved device selections.
+- Kept each output's buffering and clock correction independent; stopping or losing one output leaves the other running.
+
+## 0.2 — 2026-11-12
+
+- Fixed password encoding and sent the entered password for both receiver access and daily IP time-limit exemption.
+- Stopped rejected time-limit connections with a clear error before sending receiver setup commands.
+
 ## 0.1 — digitalmodes branch
 
 - Added embedded MFSK16, MFSK32, MFSK64, and Contestia 4-250 decoding on the Data tab.

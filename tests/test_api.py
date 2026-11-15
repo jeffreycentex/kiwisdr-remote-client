@@ -52,6 +52,56 @@ def free_port():
         return s.getsockname()[1]
 
 
+class TestDualAudio(unittest.TestCase):
+    def test_fanout_gain_failure_and_shutdown(self):
+        import numpy as np
+        from unittest.mock import patch
+
+        class Output:
+            def __init__(self, key, gain):
+                self.device_key, self.gain = key, gain
+                self.blocks = []
+                self.closed = False
+                self.fail = False
+            def write(self, samples):
+                if self.fail:
+                    raise OSError("device removed")
+                self.blocks.append(samples.copy())
+            def close(self):
+                self.closed = True
+
+        service = KiwiService(start_ticker=False)
+        try:
+            with patch("kiwiremote.radio.SoundCardSink", Output):
+                service.set_audio_output("speakers", 0.5)
+                service.set_audio_output("virtual", 1.0, output=2)
+                first, second = service.radio._sinks["card"], service.radio._sinks["card2"]
+                samples = np.array([1, 2, -3], dtype=np.int16)
+                service.radio._on_audio(samples, -80)
+                np.testing.assert_array_equal(first.blocks[0], second.blocks[0])
+                service.set_audio_gain(0.25)
+                self.assertEqual(first.gain, 0.25)
+                self.assertEqual(second.gain, 1.0)
+                service.set_audio_output(None)
+                self.assertTrue(first.closed)
+                self.assertTrue(service.status()["audio_output"])
+                service.set_audio_output("speakers", 0.5)
+                first = service.radio._sinks["card"]
+                first.fail = True
+                with self.assertLogs("kiwiremote.radio", level="ERROR"):
+                    service.radio._on_audio(samples, -80)
+                self.assertTrue(first.closed)
+                self.assertIn("card2", service.radio._sinks)
+                self.assertEqual(len(second.blocks), 2)
+                for bad in (float("nan"), float("inf"), -1):
+                    with self.assertRaises(ValueError):
+                        service.set_audio_gain(bad, output=2)
+                self.assertEqual(second.gain, 1.0)
+        finally:
+            service.shutdown()
+        self.assertTrue(second.closed)
+
+
 class TestLocality(unittest.TestCase):
     def test_addresses(self):
         for a in ("127.0.0.1", "::1", "10.1.2.3", "192.168.1.20", "172.16.5.5", "fd00::5",

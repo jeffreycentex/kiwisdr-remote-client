@@ -71,6 +71,8 @@ Returns API information: `api_version`, `app_version`, and the list of endpoints
 }
 ```
 
+`audio_output` is true when either desktop audio output is active. Output device selection remains a desktop control.
+
 `state` is one of:
 
 | `state` | Meaning |

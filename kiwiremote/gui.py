@@ -757,6 +757,24 @@ class MainWindow(QMainWindow):
         g.addWidget(self.volume, 1, 1)
         g.addWidget(self.volume_label, 1, 2)
         g.addWidget(self.audio_stats, 2, 1, 1, 2)
+        self.audio_enable2 = QCheckBox("Also play to")
+        self.audio_enable2.toggled.connect(lambda on: self._audio_toggled(on, output=2))
+        self.device_combo2 = QComboBox()
+        self.device_combo2.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.device_combo2.currentIndexChanged.connect(lambda *_: self._device_changed(output=2))
+        self.volume2 = QSlider(Qt.Horizontal, minimum=0, maximum=200, value=100)
+        self.volume2.setToolTip("Second output gain (100% = unity)")
+        self.volume2.sliderReleased.connect(lambda: self._volume_changed(output=2))
+        self.volume_label2 = QLabel("100%")
+        self.volume2.valueChanged.connect(lambda v: self.volume_label2.setText("%d%%" % v))
+        self.audio_stats2 = QLabel("")
+        self.audio_stats2.setStyleSheet("color: gray")
+        g.addWidget(self.audio_enable2, 4, 0)
+        g.addWidget(self.device_combo2, 4, 1, 1, 2)
+        g.addWidget(QLabel("Gain"), 5, 0)
+        g.addWidget(self.volume2, 5, 1)
+        g.addWidget(self.volume_label2, 5, 2)
+        g.addWidget(self.audio_stats2, 6, 1, 1, 2)
         g.setColumnStretch(1, 1)
         return box
 
@@ -934,7 +952,8 @@ class MainWindow(QMainWindow):
         idx = self.step.findData(s.value("step", 1000, type=int))
         self.step.setCurrentIndex(idx if idx >= 0 else 3)
         self._step_changed()
-        self._refresh_devices(select=s.value("audio_device", ""))
+        self._refresh_devices(select=s.value("audio_device", ""), select2=s.value("audio_device2", ""))
+        self.volume2.setValue(s.value("volume2", 100, type=int))
         self.volume.setValue(s.value("volume", 100, type=int))
         i = self.rec_format.findData(s.value("rec_format", ".wav"))
         self.rec_format.setCurrentIndex(i if i >= 0 and self.rec_format.model().item(i).isEnabled() else 0)
@@ -966,6 +985,9 @@ class MainWindow(QMainWindow):
             self.resize(680, 600)
         if s.value("audio_enable", False, type=bool) and self.device_combo.currentData():
             self.audio_enable.setChecked(True)
+
+        if s.value("audio_enable2", False, type=bool) and self.device_combo2.currentData():
+            self.audio_enable2.setChecked(True)
 
     def _save_settings(self):
         s = self.settings
@@ -1000,6 +1022,9 @@ class MainWindow(QMainWindow):
         s.setValue("audio_device", self.device_combo.currentData() or "")
         s.setValue("audio_enable", self.audio_enable.isChecked())
         s.setValue("volume", self.volume.value())
+        s.setValue("audio_device2", self.device_combo2.currentData() or "")
+        s.setValue("audio_enable2", self.audio_enable2.isChecked())
+        s.setValue("volume2", self.volume2.value())
         s.setValue("rec_format", self.rec_format.currentData())
         s.setValue("rec_dir", self.rec_dir.text())
         s.setValue("rig_enable", self.rig_enable.isChecked())
@@ -1084,36 +1109,43 @@ class MainWindow(QMainWindow):
         self.service.tune(mode=self.radio.tune.mode, passband=hz)
 
     # ================================================================== audio device
-    def _refresh_devices(self, select=None):
-        current = select if isinstance(select, str) and select else self.device_combo.currentData()
-        self.device_combo.blockSignals(True)
-        self.device_combo.clear()
+    def _refresh_devices(self, select=None, select2=None):
         devices = list_output_devices()
-        for key, label in devices:
-            self.device_combo.addItem(label, key)
-        if not devices:
-            self.device_combo.addItem("(no output devices found)", None)
-        idx = self.device_combo.findData(current) if current else -1
-        if idx < 0:
-            guess = guess_virtual_cable(devices)
-            idx = self.device_combo.findData(guess) if guess else 0
-        self.device_combo.setCurrentIndex(max(idx, 0))
-        self.device_combo.blockSignals(False)
+        for combo, selection in ((self.device_combo, select), (self.device_combo2, select2)):
+            current = selection if isinstance(selection, str) and selection else combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            for key, label in devices:
+                combo.addItem(label, key)
+            if not devices:
+                combo.addItem("(no output devices found)", None)
+            idx = combo.findData(current) if current else -1
+            if idx < 0:
+                guess = guess_virtual_cable(devices) if combo is self.device_combo else None
+                idx = combo.findData(guess) if guess else 0
+            combo.setCurrentIndex(max(idx, 0))
+            combo.blockSignals(False)
+
+    def _audio_controls(self, output):
+        return ((self.audio_enable, self.device_combo, self.volume, self.audio_stats)
+                if output == 1 else
+                (self.audio_enable2, self.device_combo2, self.volume2, self.audio_stats2))
 
     @Slot(bool)
-    def _audio_toggled(self, on):
-        key = self.device_combo.currentData() if on else None
+    def _audio_toggled(self, on, output=1):
+        enable, combo, volume, stats = self._audio_controls(output)
+        key = combo.currentData() if on else None
         if on and not key:
-            self.audio_enable.setChecked(False)
+            enable.setChecked(False)
             return
         try:
-            self.radio.set_audio_device(key, self.volume.value() / 100.0)
+            self.service.set_audio_output(key, volume.value() / 100.0, output=output)
         except Exception as e:
             QMessageBox.warning(self, "Audio device", str(e))
-            self.audio_enable.blockSignals(True)
-            self.audio_enable.setChecked(False)
-            self.audio_enable.blockSignals(False)
-            self.audio_stats.setText("")
+            enable.blockSignals(True)
+            enable.setChecked(False)
+            enable.blockSignals(False)
+            stats.setText("")
 
     def _create_pulse_sink(self, *_):
         try:
@@ -1131,14 +1163,12 @@ class MainWindow(QMainWindow):
             "The cable lasts until logout; see the README to make it permanent."
             % (sink, sink, sink))
 
-    def _device_changed(self, *_):
-        if self.audio_enable.isChecked():
-            self._audio_toggled(True)
+    def _device_changed(self, *_, output=1):
+        if self._audio_controls(output)[0].isChecked():
+            self._audio_toggled(True, output=output)
 
-    def _volume_changed(self, *_):
-        sink = self.radio._sinks.get("card")
-        if sink is not None:
-            sink.gain = self.volume.value() / 100.0
+    def _volume_changed(self, *_, output=1):
+        self.service.set_audio_gain(self._audio_controls(output)[2].value() / 100.0, output=output)
 
     # ================================================================== recording
     def _choose_dir(self, *_):
@@ -1323,11 +1353,17 @@ class MainWindow(QMainWindow):
             self.freq.blockSignals(True)
             self.freq.setRange(lo / 1000.0, hi / 1000.0)
             self.freq.blockSignals(False)
+        elif kind == "audio_output":
+            enable = self._audio_controls(payload["output"])[0]
+            enable.blockSignals(True)
+            enable.setChecked(payload["enabled"])
+            enable.blockSignals(False)
         elif kind == "sink_failed":
-            if payload == "card":
-                self.audio_enable.blockSignals(True)
-                self.audio_enable.setChecked(False)
-                self.audio_enable.blockSignals(False)
+            if payload in ("card", "card2"):
+                enable = self._audio_controls(1 if payload == "card" else 2)[0]
+                enable.blockSignals(True)
+                enable.setChecked(False)
+                enable.blockSignals(False)
             elif payload == "file":
                 self.rec_btn.blockSignals(True)
                 self.rec_btn.setChecked(False)
@@ -1369,12 +1405,14 @@ class MainWindow(QMainWindow):
             wall = time.monotonic() - self._rec_started
             self.rec_label.setText("Recording  %02d:%02d:%02d" % (wall // 3600, wall % 3600 // 60, wall % 60)
                                    + ("" if self.radio.connected else "  (waiting for audio)"))
-        stats = self.radio.audio_stats()
-        if stats:
-            self.audio_stats.setText("buffer %.0f ms   clock trim %+.0f ppm   underruns %d"
-                                     % (stats["buffer_ms"], stats["trim_ppm"], stats["underruns"]))
-        elif not self.audio_enable.isChecked():
-            self.audio_stats.setText("")
+        for output in (1, 2):
+            enable, _, _, label = self._audio_controls(output)
+            stats = self.radio.audio_stats(output=output)
+            if stats:
+                label.setText("buffer %.0f ms   clock trim %+.0f ppm   underruns %d"
+                              % (stats["buffer_ms"], stats["trim_ppm"], stats["underruns"]))
+            elif not enable.isChecked():
+                label.setText("")
 
     def closeEvent(self, ev):
         self._save_settings()

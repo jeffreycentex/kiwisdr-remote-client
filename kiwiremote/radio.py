@@ -310,7 +310,7 @@ class RadioController:
         self._rate = None
         self._limits = (MIN_FREQ_HZ, DEFAULT_MAX_FREQ_HZ)
         self._sink_lock = threading.Lock()
-        self._sinks = {}       # 'card' / 'file' -> sink
+        self._sinks = {}       # 'card' / 'card2' / 'file' / 'data' -> sink
         self._last_smeter = 0.0
         self._last_audio = None    # monotonic time of the last audio block
         self.rssi = None
@@ -643,10 +643,16 @@ class RadioController:
                     self._sink_set_rate(name, sink)
         return name in self._sinks if sink is not None else True
 
-    def set_audio_device(self, device_key, gain=1.0):
-        """device_key None -> stop sound-card output."""
+    def set_audio_device(self, device_key, gain=1.0, output=1):
+        """Select an independent sound-card output; None stops that output."""
         sink = SoundCardSink(device_key, gain) if device_key else None
-        return self._install_sink("card", sink)
+        return self._install_sink("card" if output == 1 else "card2", sink)
+
+    def set_audio_gain(self, gain, output=1):
+        with self._sink_lock:
+            sink = self._sinks.get("card" if output == 1 else "card2")
+            if sink is not None:
+                sink.gain = gain
 
     def set_data_decoder(self, sink):
         return self._install_sink("data", sink)
@@ -680,8 +686,8 @@ class RadioController:
         sink = self._sinks.get("file")
         return (sink.current_path or sink.path) if sink else None
 
-    def audio_stats(self):
-        sink = self._sinks.get("card")
+    def audio_stats(self, output=1):
+        sink = self._sinks.get("card" if output == 1 else "card2")
         return sink.stats() if sink else {}
 
     def shutdown(self):
@@ -689,3 +695,4 @@ class RadioController:
         self.stop_recording()
         self._install_sink("data", None)
         self._install_sink("card", None)
+        self._install_sink("card2", None)
