@@ -1,24 +1,32 @@
 # KiwiSDR Remote Client
 
-A receive-only desktop and headless client for remote KiwiSDR receivers. Tune a
-receiver, send its audio to speakers or a virtual cable, and record sessions while
-fldigi, WSJT-X or JS8Call handles decoding.
+KiwiSDR Remote Client is an open-source, receive-only application for Windows,
+macOS, and Linux. It connects to a KiwiSDR on your local network or over the
+internet using the receiver protocol implemented by the KiwiSDR team's
+[kiwiclient](https://github.com/jks-prv/kiwiclient).
 
-This project builds on [jeffreycentex/kiwisdr-remote](https://github.com/jeffreycentex/kiwisdr-remote)
-and uses a pinned copy of [jks-prv/kiwiclient](https://github.com/jks-prv/kiwiclient)
-for the receiver protocol. This repository contains the compact interface and the
-control, recording and security improvements developed from that codebase.
+Listen through your speakers, send audio over a virtual audio cable to programs
+like fldigi or WSJT-X, or do both at once. The client can also record audio,
+provide rig control, apply additional filters, decode supported fldigi digital
+modes, and reassemble FLAMP messages and files.
 
-See the [changelog](CHANGELOG.md) for release details.
+The project builds on [KiwiSDR Remote](https://github.com/jeffreycentex/kiwisdr-remote)
+and bundles a pinned copy of kiwiclient. See the [changelog](CHANGELOG.md) for
+release details.
+
+Find public receivers on the [KiwiSDR worldwide map](http://map.kiwisdr.com/)
+or in the [KiwiSDR receiver list](http://rx.kiwisdr.com/).
 
 ## What it does
 
 - **Tune:** USB, LSB, AM, AMN, AMW and FMN, with adjustable bandwidth and receiver-specific frequency limits.
-- **Listen:** output to speakers or a virtual audio cable, with drift correction and resampling.
+- **Listen:** play the same audio through up to two devices at once, with separate gain and clock correction for each.
 - **Record:** native-rate mono WAV, or AAC in M4A/MP4 when PyAV is installed.
 - **Control:** hamlib NET rigctl on `127.0.0.1:4532`, plus an HTTP/JSON API on `127.0.0.1:7373`.
+- **Filter:** use the KiwiSDR noise blanker, auto notch, and noise reduction, plus a local bandpass and manual notch.
 - **Run headless:** connect, tune and record without loading Qt.
 - **Decode digital text:** MFSK16, MFSK32, MFSK64, and Contestia 4-250 directly from the receiver audio on the Data tab.
+- **Receive FLAMP:** track missing blocks across repeated transmissions and save completed files on the FLAMP tab.
 - **Use a compact desktop:** a 680 × 600 light-mode window with Listen, Audio, DSP, Automation, Data, FLAMP and Log tabs. Smaller windows scroll, and window geometry is saved.
 
 The GUI, API and hamlib tuning share one service command queue. Recording has a
@@ -177,13 +185,15 @@ Keyboard shortcuts use Ctrl on Windows/Linux and Command on macOS:
 
 ## Desktop screenshots
 
+Screenshots show the current desktop app with example receiver and transfer data.
+
 ### Listen
 
 ![Listen tab showing receiver connection, tuning modes, and Quick Tune presets](docs/images/main-window.png)
 
 ### Audio
 
-![Audio tab showing output device, gain, and Record to file](docs/images/audio-tab.png)
+![Audio tab showing speakers and BlackHole 2ch enabled, separate gains, and recording controls](docs/images/audio-tab.png)
 
 ### DSP
 
@@ -192,6 +202,14 @@ Keyboard shortcuts use Ctrl on Windows/Linux and Command on macOS:
 ### Automation
 
 ![Automation tab showing Hamlib rigctld, the API, and session limits](docs/images/automation-tab.png)
+
+### Data
+
+![Data tab showing MFSK32 decoding, the audio sweetspot, squelch, decoder quality, and decoded text](docs/images/data-tab.png)
+
+### FLAMP
+
+![FLAMP tab showing a file ready to save and a second transfer waiting for missing blocks](docs/images/flamp-tab.png)
 
 ## Hamlib, API and headless mode
 
